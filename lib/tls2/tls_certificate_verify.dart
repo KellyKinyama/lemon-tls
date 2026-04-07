@@ -30,7 +30,7 @@ import 'utils.dart';
 // Output: CertificateVerify handshake body
 // ============================================================================
 
-Uint8List buildCertificateVerifyMessage({
+Uint8List buildCertificateVerify({
   required Uint8List privateKey,
   required Uint8List transcriptHash,
 }) {

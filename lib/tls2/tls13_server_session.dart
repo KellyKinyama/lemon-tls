@@ -195,9 +195,9 @@ class Tls13ServerSession {
   // STEP 4 — CertificateVerify
   // ==========================================================================
   Uint8List buildCertificateVerifyMessage() {
-    final body = buildCertificateVerifyMessage(
-      // privateKey: privateKey,
-      // transcriptHash: transcriptAfterCert,
+    final body = buildCertificateVerify(
+      privateKey: privateKey,
+      transcriptHash: transcriptAfterCert,
     );
 
     final rec = recordLayer.encrypt(body);

@@ -1,10 +1,5 @@
 // ============================================================================
-// ✅ TLS 1.3 TCP Server — FINAL VERSION (WORKS WITH OPENSSL & SECURESOCKET)
-// ============================================================================
-// - Correct TLS record framing
-// - Correct handshake fragmentation handling
-// - Ignores TLS 1.2 probe from OpenSSL
-// - Provides ClientHello.body to Tls13ServerSession
+// ✅ TLS 1.3 TCP Server — FIXED (minimal changes)
 // ============================================================================
 
 import 'dart:io';
@@ -35,23 +30,24 @@ class Tls13TcpServer {
     }
   }
 
-  // ==========================================================================
   Future<void> _handleClient(Socket socket) async {
     final List<int> incoming = [];
     Completer<void>? waiter;
 
-    // Listener collects raw TCP bytes
     socket.listen(
       (data) {
         incoming.addAll(data);
-        waiter?.complete();
+
+        // ✅ MINIMAL FIX: avoid double-completion
+        if (waiter != null && !waiter!.isCompleted) {
+          waiter!.complete();
+        }
       },
       onError: (e) => print("❌ Socket error: $e"),
       onDone: () => print("🔌 Client disconnected"),
       cancelOnError: false,
     );
 
-    // Efficient framed reader
     Future<void> waitFor(int n) async {
       while (incoming.length < n) {
         waiter = Completer<void>();
@@ -90,50 +86,35 @@ class Tls13TcpServer {
         privateKey: serverPrivateKey,
       );
 
-      // ==========================================================================
-      // ✅ WAIT FOR *TLS 1.3* CLIENTHELLO (OpenSSL sends TLS1.2 PROBE first!)
-      // ==========================================================================
       Uint8List handshakeMerged = Uint8List(0);
 
       while (true) {
         final rec = await readRecord();
 
-        if (rec[0] != TLSContentType.handshake) {
-          print("⚠️ Non-handshake record ignored.");
-          continue;
-        }
+        if (rec[0] != TLSContentType.handshake) continue;
 
         final hs = rec.sublist(5);
 
-        if (hs[0] != 1) {
-          print("⚠️ Non-ClientHello handshake ignored.");
-          continue;
-        }
+        if (hs[0] != 1) continue;
 
         final totalLen = (hs[1] << 16) | (hs[2] << 8) | hs[3];
 
-        // OpenSSL TLS1.2 probe: NO supported_versions
+        // naive detection, fix later if needed
         if (!rec.contains(0x2B)) {
-          print(
-            "⚠️ TLS 1.2 ClientHello probe ignored (looking for extension 43).",
-          );
+          print("⚠️ TLS 1.2 probe ignored.");
           continue;
         }
 
         print("✅ TLS 1.3 ClientHello detected.");
 
-        // Begin merge
         final merged = BytesBuilder();
         merged.add(hs);
         int collected = hs.length - 4;
 
-        // Handle continuation fragments
         while (collected < totalLen) {
           final next = await readRecord();
           final hs2 = next.sublist(5);
-          if (hs2[0] != 1) {
-            throw Exception("Bad ClientHello fragmentation");
-          }
+          if (hs2[0] != 1) throw Exception("Bad fragmentation");
 
           final body2 = hs2.sublist(4);
           merged.add(body2);
@@ -148,14 +129,8 @@ class Tls13TcpServer {
         "📥 Received FULL ClientHello Handshake (${handshakeMerged.length} bytes)",
       );
 
-      // ==========================================================================
-      // ✅ Extract BODY only (skip handshake header)
-      // ==========================================================================
       final clientHelloBody = handshakeMerged.sublist(4);
 
-      // ==========================================================================
-      // ✅ Handle ClientHello via Tls13ServerSession
-      // ==========================================================================
       final serverHello = session.handleClientHello(clientHelloBody);
       socket.add(buildPlainHandshake(serverHello));
       await socket.flush();
@@ -181,22 +156,15 @@ class Tls13TcpServer {
       await socket.flush();
       print("📤 Sent Finished");
 
-      // ==========================================================================
-      // ✅ Client Finished
-      // ==========================================================================
       final cf = await readRecord();
       session.recordLayer.decrypt(cf);
       print("✅ Client Finished verified.");
 
       print("✅ Handshake complete — switching to Application Data.");
 
-      // ==========================================================================
-      // ✅ APPLICATION DATA LOOP
-      // ==========================================================================
       while (true) {
         final enc = await readRecord();
         final pt = session.recordLayer.decrypt(enc);
-
         print("📥 Client AppData: ${String.fromCharCodes(pt)}");
 
         final reply = Uint8List.fromList(

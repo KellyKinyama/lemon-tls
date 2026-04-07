@@ -6,7 +6,9 @@
 import 'dart:typed_data';
 import 'package:hex/hex.dart';
 
-import '../../fast_crypt/fastcrypt.dart';
+import 'cipher/aes_gcm.dart' as aes_gcm;
+
+// import '../../fast_crypt/fastcrypt.dart';
 
 // ============================================================================
 // TLS 1.3 Nonce = IV XOR sequence_number   (RFC 8446 §5.3)
@@ -45,7 +47,7 @@ Uint8List tls13EncryptRecord({
   required Uint8List plaintext,
   required int sequence,
 }) {
-  final crypt = FastCrypt();
+  // final crypt = FastCrypt();
 
   // Append inner content type = handshake or application_data
   final Uint8List pt = Uint8List.fromList([
@@ -64,13 +66,16 @@ Uint8List tls13EncryptRecord({
   final nonce = tls13Nonce(iv, sequence);
 
   // Perform AES-GCM encryption via FastCrypt
-  final encrypted = crypt.encryptBytes(pt, key: key, nonce: nonce, aad: header);
+
+  final encrypted = aes_gcm.encrypt(key, pt, nonce, header);
+  // final encrypted = crypt.encryptBytes(pt, key: key, nonce: nonce, aad: header);
 
   // TLS 1.3 ciphertext = ciphertext || tag (16 bytes)
-  final combined = Uint8List.fromList([
-    ...encrypted.ciphertext,
-    ...encrypted.tag,
-  ]);
+  final combined = encrypted;
+  // final combined = Uint8List.fromList([
+  //   ...encrypted.ciphertext,
+  //   ...encrypted.tag,
+  // ]);
 
   // Patch header length
   final len = combined.length;
@@ -94,7 +99,7 @@ Uint8List tls13DecryptRecord({
   required Uint8List record,
   required int sequence,
 }) {
-  final crypt = FastCrypt();
+  // final crypt = FastCrypt();
 
   int offset = 0;
 
@@ -119,12 +124,11 @@ Uint8List tls13DecryptRecord({
   final nonce = tls13Nonce(iv, sequence);
 
   // Decrypt
-  final decrypted = crypt.decryptBytes(
-    ciphertext: ct,
-    tag: tag,
-    key: key,
-    nonce: nonce,
-    aad: aeadHeader,
+  final decrypted = aes_gcm.decrypt(
+    key,
+    Uint8List.fromList([...ct, ...tag]),
+    nonce,
+    aeadHeader,
   );
 
   // Last byte = inner content type

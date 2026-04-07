@@ -5,9 +5,9 @@
 import 'dart:typed_data';
 import 'package:hex/hex.dart';
 
-import '../cipher/aes_gcm.dart'; // ← your AES‑GCM encrypt/decrypt
+import '../cipher/aes_gcm.dart' as aes_gcm; // ← your AES‑GCM encrypt/decrypt
 import '../handlers/message_types.dart';
-import '../tls1_3.dart'; // ← HKDF, crypto utils, ContentType, etc.
+// import '../tls1_3.dart'; // ← HKDF, crypto utils, ContentType, etc.
 // import 'message_types.dart';
 
 // ===========================================================
@@ -135,7 +135,7 @@ Uint8List buildTlsCiphertextRecord({
   final nonce = tls13Nonce(iv, sequence);
 
   // AES‑GCM
-  final ciphertext = encrypt(key, pt, nonce, header);
+  final ciphertext = aes_gcm.encrypt(key, pt, nonce, header);
 
   // Fill length
   final len = ciphertext.length;
@@ -168,7 +168,7 @@ Uint8List parseAndDecryptRecord({
 
   final nonce = tls13Nonce(iv, sequence);
 
-  final decrypted = decrypt(key, ciphertext, nonce, header);
+  final decrypted = aes_gcm.decrypt(key, ciphertext, nonce, header);
 
   // Last byte = real inner content type
   final innerType = decrypted.last;
