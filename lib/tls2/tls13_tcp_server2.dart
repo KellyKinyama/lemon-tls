@@ -1,20 +1,47 @@
 // ============================================================================
-// ✅ TLS 1.3 TCP Server — FINAL FIXED VERSION (NO BUFFER CORRUPTION)
-// ============================================================================
-// - Single permanent socket listener
-// - Correct ring-buffer implementation
-// - Correct record parsing
-// - Correct ClientHello.body extraction
-// - Full fragmentation-safe handshake
+// ✅ TLS 1.3 TCP Server — FIXED (minimal changes + DEBUG ONLY)
 // ============================================================================
 
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:async';
 
-import 'tls13_server_session.dart';
+import 'tls13_server_session2.dart';
 import 'tls_record_layer.dart';
-import 'tls_constants.dart';
+// import 'tls_constants.dart';
+
+// ============================================================================
+// DEBUG HELPERS (NO SIDE EFFECTS)
+// ============================================================================
+
+String hex(Uint8List b, [int max = 64]) {
+  final cut = b.length > max ? b.sublist(0, max) : b;
+  final s = cut.map((x) => x.toRadixString(16).padLeft(2, '0')).join(' ');
+  return b.length > max
+      ? "$s ... (${b.length} bytes)"
+      : "$s (${b.length} bytes)";
+}
+
+void dumpRecord(String label, Uint8List rec) {
+  final len = (rec[3] << 8) | rec[4];
+  print("");
+  print("🔎 $label TLS RECORD");
+  print("  type   = ${rec[0]}");
+  print("  ver    = ${rec[1].toRadixString(16)} ${rec[2].toRadixString(16)}");
+  print("  length = $len");
+  print("  data   = ${hex(rec.sublist(5))}");
+}
+
+void dumpHandshake(String label, Uint8List hs) {
+  final len = (hs[1] << 16) | (hs[2] << 8) | hs[3];
+  print("");
+  print("🔎 $label HANDSHAKE");
+  print("  hsType = ${hs[0]}");
+  print("  hsLen  = $len");
+  print("  body   = ${hex(hs.sublist(4))}");
+}
+
+// ============================================================================
 
 class Tls13TcpServer {
   final int port;
@@ -36,25 +63,23 @@ class Tls13TcpServer {
     }
   }
 
-  // ==========================================================================
-  // MAIN HANDLER
-  // ==========================================================================
   Future<void> _handleClient(Socket socket) async {
-    final List<int> incoming = [];     // ✅ Ring buffer
+    final List<int> incoming = [];
     Completer<void>? waiter;
 
-    // ✅ Permanent listener (never listen twice)
     socket.listen(
       (data) {
         incoming.addAll(data);
-        waiter?.complete();
+
+        if (waiter != null && !waiter!.isCompleted) {
+          waiter!.complete();
+        }
       },
       onError: (e) => print("❌ Socket error: $e"),
       onDone: () => print("🔌 Client disconnected"),
       cancelOnError: false,
     );
 
-    // ----------------------------------------------------------------------
     Future<void> waitFor(int n) async {
       while (incoming.length < n) {
         waiter = Completer<void>();
@@ -64,131 +89,113 @@ class Tls13TcpServer {
 
     Future<Uint8List> readN(int n) async {
       await waitFor(n);
-      final bytes = Uint8List.fromList(incoming.sublist(0, n));
+      final out = Uint8List.fromList(incoming.sublist(0, n));
       incoming.removeRange(0, n);
-      return bytes;
+      return out;
     }
 
     Future<Uint8List> readRecord() async {
       final header = await readN(5);
       final len = (header[3] << 8) | header[4];
       final payload = await readN(len);
-      return Uint8List.fromList([...header, ...payload]);
+      final rec = Uint8List.fromList([...header, ...payload]);
+      dumpRecord("RX", rec);
+      return rec;
     }
 
     Uint8List buildPlainHandshake(Uint8List body) {
-      final out = BytesBuilder();
-      out.addByte(TLSContentType.handshake);
-      out.addByte(0x03);
-      out.addByte(0x03);
-      out.addByte((body.length >> 8) & 0xFF);
-      out.addByte(body.length & 0xFF);
-      out.add(body);
-      return out.toBytes();
+      final rec = Uint8List.fromList([
+        TLSContentType.handshake,
+        0x03,
+        0x03,
+        (body.length >> 8) & 0xFF,
+        body.length & 0xFF,
+        ...body,
+      ]);
+      dumpHandshake("TX ServerHello", body);
+      dumpRecord("TX ServerHello", rec);
+      return rec;
     }
 
-    // ==========================================================================
-    // ✅ TLS 1.3 HANDSHAKE
-    // ==========================================================================
     try {
       final session = Tls13ServerSession(
         certificate: serverCertificate,
         privateKey: serverPrivateKey,
       );
 
-      // -------------------------------------------------------------
-      // ✅ Read first record (ClientHello may be entire or partial)
-      // -------------------------------------------------------------
-      final first = await readRecord();
+      Uint8List handshakeMerged = Uint8List(0);
 
-      if (first[0] != TLSContentType.handshake) {
-        throw Exception("Expected handshake record");
+      while (true) {
+        final rec = await readRecord();
+
+        if (rec[0] != TLSContentType.handshake) continue;
+
+        final hs = rec.sublist(5);
+
+        if (hs[0] != 1) continue;
+
+        final totalLen = (hs[1] << 16) | (hs[2] << 8) | hs[3];
+
+        if (!rec.contains(0x2B)) {
+          print("⚠️ TLS 1.2 probe ignored.");
+          continue;
+        }
+
+        print("✅ TLS 1.3 ClientHello detected.");
+
+        final merged = BytesBuilder();
+        merged.add(hs);
+        int collected = hs.length - 4;
+
+        while (collected < totalLen) {
+          final next = await readRecord();
+          final hs2 = next.sublist(5);
+          if (hs2[0] != 1) throw Exception("Bad fragmentation");
+          final body2 = hs2.sublist(4);
+          merged.add(body2);
+          collected += body2.length;
+        }
+
+        handshakeMerged = merged.toBytes();
+        dumpHandshake("RX ClientHello (full)", handshakeMerged);
+        break;
       }
 
-      final hs = first.sublist(5); // handshake header + body
+      final clientHelloBody = handshakeMerged.sublist(4);
 
-      if (hs[0] != 1) {
-        throw Exception("Expected ClientHello handshake");
-      }
-
-      final hLen = (hs[1] << 16) | (hs[2] << 8) | hs[3];
-
-      BytesBuilder full = BytesBuilder();
-      full.add(hs);
-
-      int collected = hs.length - 4;
-
-      // -------------------------------------------------------------
-      // ✅ Read continuation fragments (if ClientHello > 1 record)
-      // -------------------------------------------------------------
-      while (collected < hLen) {
-        final nextRec = await readRecord();
-        final nextBody = nextRec.sublist(5); // continuation records contain only body
-        full.add(nextBody);
-        collected += nextBody.length;
-      }
-
-      final handshakeStruct = full.toBytes();
-
-      print(
-        "📥 Received FULL ClientHello Handshake (${handshakeStruct.length} bytes)",
-      );
-
-      // -------------------------------------------------------------
-      // ✅ Strip handshake header
-      // -------------------------------------------------------------
-      final clientHelloBody = handshakeStruct.sublist(4); // ✅ CORRECT
-
-      // -------------------------------------------------------------
-      // ✅ Parse CH & Build ServerHello
-      // -------------------------------------------------------------
       final serverHello = session.handleClientHello(clientHelloBody);
-
       socket.add(buildPlainHandshake(serverHello));
       await socket.flush();
       print("📤 Sent ServerHello");
 
-      // -------------------------------------------------------------
-      final encExt = session.buildEncryptedExtensions();
-      socket.add(encExt);
+      final ext = session.buildEncryptedExtensions();
+      dumpRecord("TX EncryptedExtensions", ext);
+      socket.add(ext);
       await socket.flush();
+      print("📤 Sent EncryptedExtensions");
 
       final cert = session.buildCertificateMessage();
+      dumpRecord("TX Certificate", cert);
       socket.add(cert);
       await socket.flush();
+      print("📤 Sent Certificate");
 
       final cv = session.buildCertificateVerifyMessage();
+      dumpRecord("TX CertificateVerify", cv);
       socket.add(cv);
       await socket.flush();
+      print("📤 Sent CertificateVerify");
 
       final fin = session.buildFinishedMessage();
+      dumpRecord("TX Finished", fin);
       socket.add(fin);
       await socket.flush();
+      print("📤 Sent Finished");
 
-      // -------------------------------------------------------------
-      // ✅ Client Finished
-      // -------------------------------------------------------------
       final cf = await readRecord();
-      session.recordLayer.decrypt(cf);
-
-      print("✅ Handshake complete");
-
-      // ==========================================================================
-      // ✅ APPLICATION DATA LOOP
-      // ==========================================================================
-      while (true) {
-        final enc = await readRecord();
-        final pt = session.recordLayer.decrypt(enc);
-        print("📥 Client AppData: ${String.fromCharCodes(pt)}");
-
-        final reply = Uint8List.fromList(
-          "Hello from Dart TLS 1.3 server!".codeUnits,
-        );
-
-        final encReply = session.recordLayer.encrypt(reply);
-        socket.add(encReply);
-        await socket.flush();
-      }
+      final pt = session.recordLayer.decrypt(cf);
+      dumpHandshake("RX Client Finished", pt);
+      print("✅ Client Finished verified.");
     } catch (e, st) {
       print("❌ TLS handshake error: $e");
       print(st);

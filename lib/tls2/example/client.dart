@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 import 'dart:io';
 
-import 'tls13_tcp_server.dart';
+import '../tls13_tcp_client.dart';
 
 void main() async {
   // Load your certificate (DER)
@@ -10,11 +10,11 @@ void main() async {
   // Load your raw P‑256 private key bytes
   final priv = await File("privkey.bin").readAsBytes();
 
-  final server = Tls13TcpServer(
+  final client = Tls13TcpClient(
     port: 4433,
-    serverCertificate: Uint8List.fromList(cert),
-    serverPrivateKey: Uint8List.fromList(priv),
+    clientCertificate: Uint8List.fromList(cert),
+    clientPrivateKey: Uint8List.fromList(priv),
   );
 
-  await server.start();
+  await client.connect();
 }

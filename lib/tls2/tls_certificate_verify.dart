@@ -11,8 +11,8 @@
 import 'dart:typed_data';
 import 'dart:convert';
 
-import '../tls/crypto_hash.dart';
-import '../tls/ecdsa.dart';
+import 'crypto_hash.dart';
+import 'ecdsa.dart';
 import 'utils.dart';
 
 // ============================================================================
@@ -35,29 +35,45 @@ Uint8List buildCertificateVerify({
   required Uint8List transcriptHash,
 }) {
   // --------------------------------------------------------------------------
-  // RFC 8446: context string
+  // RFC 8446 §4.4.3
+  // toBeSigned =
+  //   64 bytes of ASCII space (0x20)
+  //   || "TLS 1.3, server CertificateVerify"
+  //   || 0x00
+  //   || transcript_hash
   // --------------------------------------------------------------------------
+
+  // 64 bytes of ASCII space (0x20)
+  final prefix = Uint8List(64)..fillRange(0, 64, 0x20);
+
+  // Context string
   final context = utf8.encode("TLS 1.3, server CertificateVerify");
 
-  final toSign = Uint8List.fromList([...context, 0x00, ...transcriptHash]);
+  final toSign = Uint8List.fromList([
+    ...prefix,
+    ...context,
+    0x00,
+    ...transcriptHash,
+  ]);
 
-  // Hash it
+  // Hash it (SHA‑256 for ecdsa_secp256r1_sha256)
   final hashed = createHash(toSign);
 
   // Produce deterministic ECDSA signature (DER encoded)
   final signature = tls13EcdsaSign(privateKey, hashed);
 
   // Build CertificateVerify structure
+  //
+  // struct {
+  //   SignatureScheme algorithm;   // uint16
+  //   opaque signature<0..2^16-1>; // uint16 length + bytes
+  // }
   final out = Uint8List(2 + 2 + signature.length);
   int off = 0;
 
-  // algorithm = 0x0403 (ecdsa_secp256r1_sha256)
+  // ecdsa_secp256r1_sha256 = 0x0403
   off = w_u16(out, off, 0x0403);
-
-  // signature length
   off = w_u16(out, off, signature.length);
-
-  // signature bytes
   off = w_bytes(out, off, signature);
 
   return out;

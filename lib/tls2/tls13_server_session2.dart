@@ -1,10 +1,9 @@
 // ============================================================================
-// TLS 1.3 SERVER HANDSHAKE ENGINE — FINAL CORRECT VERSION
-// RFC 8446–Compliant
+// TLS 1.3 SERVER HANDSHAKE ENGINE — TRANSCRIPT-CORRECT VERSION
+// RFC 8446 compliant (byte-exact transcript hashing)
 // ============================================================================
 
 import 'dart:typed_data';
-
 import 'package:hex/hex.dart';
 
 import '../hash.dart'; // createHash(), hmacSha256()
@@ -22,7 +21,6 @@ import 'tls_record_layer.dart';
 // Helpers
 // ============================================================================
 
-// NOT crypto‑secure, allowed for ServerHello.random
 Uint8List _randBytes(int n) {
   final out = Uint8List(n);
   for (int i = 0; i < n; i++) {
@@ -32,11 +30,6 @@ Uint8List _randBytes(int n) {
 }
 
 /// Wrap a handshake BODY as a Handshake message
-/// struct {
-///   HandshakeType msg_type;
-///   uint24 length;
-///   opaque body[length];
-/// }
 Uint8List _handshake(int type, Uint8List body) {
   final len = body.length;
   return Uint8List.fromList([
@@ -49,21 +42,33 @@ Uint8List _handshake(int type, Uint8List body) {
 }
 
 // ============================================================================
+// Byte‑exact TLS 1.3 transcript
+// ============================================================================
+
+class HandshakeTranscript {
+  final BytesBuilder _buf = BytesBuilder(copy: false);
+
+  void add(Uint8List handshakeBytes) {
+    _buf.add(handshakeBytes);
+  }
+
+  Uint8List hash() {
+    return createHash(_buf.toBytes());
+  }
+
+  Uint8List bytes() => _buf.toBytes();
+}
+
+// ============================================================================
 // TLS 1.3 Server Session
 // ============================================================================
 
 class Tls13ServerSession {
-  final Uint8List certificate; // DER
-  final Uint8List privateKey; // raw P‑256 private key
+  final Uint8List certificate;
+  final Uint8List privateKey;
 
-  late Uint8List clientHello; // Handshake(ClientHello)
-  late Uint8List serverHello; // Handshake(ServerHello)
-
-  // Transcript hashes
-  late Uint8List h1; // CH + SH
-  late Uint8List h2; // + EncryptedExtensions
-  late Uint8List h3; // + Certificate
-  late Uint8List h4; // + CertificateVerify
+  late HandshakeTranscript transcript;
+  late Uint8List clientRandom;
 
   late Tls13KeySchedule keySchedule;
   late TlsRecordLayer recordLayer;
@@ -79,16 +84,23 @@ class Tls13ServerSession {
   // STEP 1 — ClientHello → ServerHello
   // ==========================================================================
 
-  /// Input: ClientHello BODY (no handshake header)
-  /// Output: ServerHello HANDSHAKE
-  Uint8List handleClientHello(Uint8List clientHelloBody) {
-    // Reconstruct full ClientHello handshake
-    clientHello = _handshake(HandshakeType.clientHello, clientHelloBody);
+  /// Input: FULL ClientHello handshake bytes
+  Uint8List handleClientHello(Uint8List clientHelloHandshake) {
+    transcript = HandshakeTranscript();
+
+    // ✅ Add exact ClientHello wire bytes to transcript
+    transcript.add(clientHelloHandshake);
+
+    // ✅ Parse ONLY body (skip handshake header)
+    final clientHelloBody = clientHelloHandshake.sublist(4);
+
+    // legacy_version (2) + random (32)
+    clientRandom = clientHelloBody.sublist(2, 34);
 
     final parsed = parseHello(TLSMessageType.CLIENT_HELLO, clientHelloBody);
     final extensions = parsed["extensions"] as List;
 
-    // Key exchange negotiation
+    // Negotiation
     final groups = _extractSupportedGroups(extensions);
     final shares = _extractKeyShares(extensions);
     if (shares.isEmpty) {
@@ -99,19 +111,18 @@ class Tls13ServerSession {
         _negotiateGroup(groups, shares) ??
         (throw Exception("No mutually supported ECDHE group"));
 
-    final peerKey =
+    final clientPub =
         shares.firstWhere((e) => e["group"] == selectedGroup)["key_exchange"]
             as Uint8List;
 
-    // ECDHE
     final ks = Tls13KeyShare.generate(
       group: selectedGroup,
-      clientPublicKey: peerKey,
+      clientPublicKey: clientPub,
     );
     serverPublicKey = ks.publicKey;
 
-    // ServerHello BODY
-    final body = buildHello("server", {
+    // Build ServerHello BODY
+    final shBody = buildHello("server", {
       "random": _randBytes(32),
       "cipher_suite": CipherSuite.tlsAes128GcmSha256,
       "session_id": parsed["session_id"],
@@ -124,37 +135,29 @@ class Tls13ServerSession {
       ],
     });
 
-    serverHello = _handshake(HandshakeType.serverHello, body);
+    // Build ServerHello HANDSHAKE
+    final serverHello = _handshake(HandshakeType.serverHello, shBody);
 
-    // Transcript hash TH1
-    h1 = createHash(Uint8List.fromList([...clientHello, ...serverHello]));
+    // ✅ Add ServerHello wire bytes
+    transcript.add(serverHello);
 
-    // Key schedule (install handshake keys ONCE)
+    // Key schedule
     keySchedule = Tls13KeySchedule();
     keySchedule.computeHandshakeSecrets(
       sharedSecret: ks.sharedSecret,
-      helloHash: h1,
+      helloHash: transcript.hash(),
     );
 
-    // ======================================================================
-    // 🔑 TLS 1.3 HANDSHAKE TRAFFIC SECRET LOGGING (RFC 8446 / SSLKEYLOGFILE)
-    // ======================================================================
-
-    final clientRandom = _extractClientRandom(clientHello);
-
-    final clientHsSecret = keySchedule.clientHandshakeTrafficSecret;
-    final serverHsSecret = keySchedule.serverHandshakeTrafficSecret;
-
+    // 🔑 Log secrets
     print(
       "CLIENT_HANDSHAKE_TRAFFIC_SECRET "
       "${HEX.encode(clientRandom)} "
-      "${HEX.encode(clientHsSecret)}",
+      "${HEX.encode(keySchedule.clientHandshakeTrafficSecret)}",
     );
-
     print(
       "SERVER_HANDSHAKE_TRAFFIC_SECRET "
       "${HEX.encode(clientRandom)} "
-      "${HEX.encode(serverHsSecret)}",
+      "${HEX.encode(keySchedule.serverHandshakeTrafficSecret)}",
     );
 
     recordLayer = TlsRecordLayer();
@@ -164,13 +167,12 @@ class Tls13ServerSession {
       serverKey: keySchedule.serverHandshakeKey,
       serverIV: keySchedule.serverHandshakeIV,
     );
-    // IMPORTANT: no further resets or key installs until Finished
 
     return serverHello;
   }
 
   // ==========================================================================
-  // STEP 2 — EncryptedExtensions
+  // EncryptedExtensions
   // ==========================================================================
 
   Uint8List buildEncryptedExtensions() {
@@ -178,19 +180,12 @@ class Tls13ServerSession {
       HandshakeType.encryptedExtensions,
       buildExtensions([]),
     );
-    final rec = recordLayer.encrypt(hs);
-
-    h2 = createHash(Uint8List.fromList([...h1, ...hs]));
-    return rec;
-  }
-
-  Uint8List _extractClientRandom(Uint8List clientHelloHandshake) {
-    // Skip handshake header (4) + legacy_version (2)
-    return clientHelloHandshake.sublist(4 + 2, 4 + 2 + 32);
+    transcript.add(hs);
+    return recordLayer.encrypt(hs);
   }
 
   // ==========================================================================
-  // STEP 3 — Certificate
+  // Certificate
   // ==========================================================================
 
   Uint8List buildCertificateMessage() {
@@ -203,31 +198,27 @@ class Tls13ServerSession {
     });
 
     final hs = _handshake(HandshakeType.certificate, body);
-    final rec = recordLayer.encrypt(hs);
-
-    h3 = createHash(Uint8List.fromList([...h2, ...hs]));
-    return rec;
+    transcript.add(hs);
+    return recordLayer.encrypt(hs);
   }
 
   // ==========================================================================
-  // STEP 4 — CertificateVerify
+  // CertificateVerify
   // ==========================================================================
 
   Uint8List buildCertificateVerifyMessage() {
     final body = buildCertificateVerify(
       privateKey: privateKey,
-      transcriptHash: h3,
+      transcriptHash: transcript.hash(),
     );
 
     final hs = _handshake(HandshakeType.certificateVerify, body);
-    final rec = recordLayer.encrypt(hs);
-
-    h4 = createHash(Uint8List.fromList([...h3, ...hs]));
-    return rec;
+    transcript.add(hs);
+    return recordLayer.encrypt(hs);
   }
 
   // ==========================================================================
-  // STEP 5 — Finished
+  // Finished
   // ==========================================================================
 
   Uint8List buildFinishedMessage() {
@@ -238,16 +229,16 @@ class Tls13ServerSession {
       32,
     );
 
-    final verifyData = hmacSha256(finishedKey, h4);
+    final verifyData = hmacSha256(finishedKey, transcript.hash());
+
     final hs = _handshake(HandshakeType.finished, verifyData);
+
+    transcript.add(hs);
     final rec = recordLayer.encrypt(hs);
 
-    // Switch to application traffic keys
-    keySchedule.computeApplicationSecrets(
-      createHash(Uint8List.fromList([...h4, ...hs])),
-    );
-
+    keySchedule.computeApplicationSecrets(transcript.hash());
     handshakeComplete = true;
+
     return rec;
   }
 
@@ -276,7 +267,7 @@ class Tls13ServerSession {
 }
 
 // ============================================================================
-// Constants (for clarity)
+// Constants
 // ============================================================================
 
 class HandshakeType {

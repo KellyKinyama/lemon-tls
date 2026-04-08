@@ -6,8 +6,8 @@ import 'package:basic_utils/basic_utils.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:pointycastle/export.dart';
 
-import 'tls13_tcp_server.dart';
-import 'tls_extensions.dart';
+import '../tls13_tcp_server2.dart';
+import '../tls_extensions.dart';
 
 // ======================================================================
 // Helpers for raw P‑256 keys
