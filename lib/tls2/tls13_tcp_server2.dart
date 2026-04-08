@@ -1,5 +1,6 @@
 // ============================================================================
-// ✅ TLS 1.3 TCP Server — FIXED (minimal changes + DEBUG ONLY)
+// ✅ TLS 1.3 TCP Server — CORRECTED FOR 2‑PARAM ClientHello API
+// RFC 8446 compatible
 // ============================================================================
 
 import 'dart:io';
@@ -8,10 +9,9 @@ import 'dart:async';
 
 import 'tls13_server_session2.dart';
 import 'tls_record_layer.dart';
-// import 'tls_constants.dart';
 
 // ============================================================================
-// DEBUG HELPERS (NO SIDE EFFECTS)
+// DEBUG HELPERS
 // ============================================================================
 
 String hex(Uint8List b, [int max = 64]) {
@@ -42,6 +42,8 @@ void dumpHandshake(String label, Uint8List hs) {
 }
 
 // ============================================================================
+// TCP SERVER
+// ============================================================================
 
 class Tls13TcpServer {
   final int port;
@@ -57,6 +59,7 @@ class Tls13TcpServer {
   Future<void> start() async {
     final server = await ServerSocket.bind(InternetAddress.anyIPv4, port);
     print("✅ TLS 1.3 Server listening on port $port...");
+
     await for (final client in server) {
       print("🔌 Client connected from ${client.remoteAddress.address}");
       _handleClient(client);
@@ -70,7 +73,6 @@ class Tls13TcpServer {
     socket.listen(
       (data) {
         incoming.addAll(data);
-
         if (waiter != null && !waiter!.isCompleted) {
           waiter!.complete();
         }
@@ -103,16 +105,16 @@ class Tls13TcpServer {
       return rec;
     }
 
-    Uint8List buildPlainHandshake(Uint8List body) {
+    Uint8List buildPlainHandshake(Uint8List handshake) {
       final rec = Uint8List.fromList([
         TLSContentType.handshake,
         0x03,
         0x03,
-        (body.length >> 8) & 0xFF,
-        body.length & 0xFF,
-        ...body,
+        (handshake.length >> 8) & 0xFF,
+        handshake.length & 0xFF,
+        ...handshake,
       ]);
-      dumpHandshake("TX ServerHello", body);
+      dumpHandshake("TX ServerHello", handshake);
       dumpRecord("TX ServerHello", rec);
       return rec;
     }
@@ -123,16 +125,17 @@ class Tls13TcpServer {
         privateKey: serverPrivateKey,
       );
 
-      Uint8List handshakeMerged = Uint8List(0);
+      Uint8List handshakeMerged;
 
+      // ----------------------------------------------------------------------
+      // Read full ClientHello (may be fragmented)
+      // ----------------------------------------------------------------------
       while (true) {
         final rec = await readRecord();
-
         if (rec[0] != TLSContentType.handshake) continue;
 
         final hs = rec.sublist(5);
-
-        if (hs[0] != 1) continue;
+        if (hs[0] != 1) continue; // NOT ClientHello
 
         final totalLen = (hs[1] << 16) | (hs[2] << 8) | hs[3];
 
@@ -145,12 +148,15 @@ class Tls13TcpServer {
 
         final merged = BytesBuilder();
         merged.add(hs);
+
         int collected = hs.length - 4;
 
         while (collected < totalLen) {
           final next = await readRecord();
           final hs2 = next.sublist(5);
-          if (hs2[0] != 1) throw Exception("Bad fragmentation");
+          if (hs2[0] != 1) {
+            throw Exception("Bad ClientHello fragmentation");
+          }
           final body2 = hs2.sublist(4);
           merged.add(body2);
           collected += body2.length;
@@ -161,41 +167,48 @@ class Tls13TcpServer {
         break;
       }
 
+      // ----------------------------------------------------------------------
+      // ✅ PASS BOTH FORMS TO SESSION
+      // ----------------------------------------------------------------------
       final clientHelloBody = handshakeMerged.sublist(4);
 
-      final serverHello = session.handleClientHello(clientHelloBody);
+      final serverHello = session.handleClientHello(
+        handshakeMerged, // FULL handshake bytes (transcript)
+        clientHelloBody, // BODY ONLY (parsing)
+      );
+
       socket.add(buildPlainHandshake(serverHello));
       await socket.flush();
       print("📤 Sent ServerHello");
 
-      final ext = session.buildEncryptedExtensions();
-      dumpRecord("TX EncryptedExtensions", ext);
-      socket.add(ext);
+      final ee = session.buildEncryptedExtensions();
+      dumpRecord("TX EncryptedExtensions", ee);
+      socket.add(ee);
       await socket.flush();
-      print("📤 Sent EncryptedExtensions");
 
       final cert = session.buildCertificateMessage();
       dumpRecord("TX Certificate", cert);
       socket.add(cert);
       await socket.flush();
-      print("📤 Sent Certificate");
 
       final cv = session.buildCertificateVerifyMessage();
       dumpRecord("TX CertificateVerify", cv);
       socket.add(cv);
       await socket.flush();
-      print("📤 Sent CertificateVerify");
 
       final fin = session.buildFinishedMessage();
       dumpRecord("TX Finished", fin);
       socket.add(fin);
       await socket.flush();
-      print("📤 Sent Finished");
 
+      // ----------------------------------------------------------------------
+      // Client Finished
+      // ----------------------------------------------------------------------
       final cf = await readRecord();
       final pt = session.recordLayer.decrypt(cf);
       dumpHandshake("RX Client Finished", pt);
-      print("✅ Client Finished verified.");
+
+      print("✅ TLS 1.3 handshake complete.");
     } catch (e, st) {
       print("❌ TLS handshake error: $e");
       print(st);
