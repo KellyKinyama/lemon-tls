@@ -64,18 +64,18 @@ Uint8List quicHkdfExpandLabel({
 // ==========================================================
 //
 
-Uint8List quicNonce(Uint8List iv, int packetNumber) {
-  final out = Uint8List(iv.length);
-  final pn = Uint8List(iv.length);
+// Uint8List quicNonce(Uint8List iv, int packetNumber) {
+//   final out = Uint8List(iv.length);
+//   final pn = Uint8List(iv.length);
 
-  final bd = ByteData.sublistView(pn);
-  bd.setUint64(iv.length - 8, packetNumber, Endian.big);
+//   final bd = ByteData.sublistView(pn);
+//   bd.setUint64(iv.length - 8, packetNumber, Endian.big);
 
-  for (int i = 0; i < iv.length; i++) {
-    out[i] = iv[i] ^ pn[i];
-  }
-  return out;
-}
+//   for (int i = 0; i < iv.length; i++) {
+//     out[i] = iv[i] ^ pn[i];
+//   }
+//   return out;
+// }
 
 //
 // ==========================================================

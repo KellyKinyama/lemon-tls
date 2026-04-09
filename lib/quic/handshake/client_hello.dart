@@ -1,8 +1,8 @@
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'byte_reader.dart';
-import 'handshake_headers.dart';
+import '../byte_reader.dart';
+import '../handshake_headers.dart';
 
 const int EXT_SERVER_NAME = 0x00;
 const int EXT_SUPPORTED_GROUPS = 0x0A;

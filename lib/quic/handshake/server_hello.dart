@@ -1,9 +1,9 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'byte_reader.dart';
-import 'handshake_headers.dart';
-import 'aead.dart';
+import '../byte_reader.dart';
+import '../handshake_headers.dart';
+import '../aead.dart';
 
 Uint8List _u8(int v) => Uint8List.fromList([v & 0xFF]);
 
