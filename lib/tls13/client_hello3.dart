@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:lemon_tls/tls13/server_hello.dart';
 
+import 'byte_reader.dart';
 import 'record_header.dart';
 import 'handshake_headers.dart';
 
@@ -176,10 +177,10 @@ class ClientHello {
   final RecordHeader recordHeader;
   final HandshakeHeader handshakeHeader;
 
-  final Uint8List clientRandom = _randomBytes(32);
-  final Uint8List sessionId = Uint8List(0); // MUST be empty
+  Uint8List clientRandom = _randomBytes(32);
+  Uint8List sessionId = Uint8List(0); // MUST be empty
 
-  final Uint8List cipherSuites = Uint8List.fromList([
+  Uint8List cipherSuites = Uint8List.fromList([
     0x13,
     0x01,
     0x13,
@@ -190,21 +191,35 @@ class ClientHello {
 
   final List<ClientHelloExtension> extensions;
 
-  ClientHello({required Uint8List domain, required Uint8List publicKeyBytes})
-    : recordHeader = RecordHeader(
-        rtype: 0x16,
-        legacyProtoVersion: 0x0303, // FIXED
-        size: 0,
-      ),
-      handshakeHeader = HandshakeHeader(messageType: 1, size: 0),
-      extensions = [
-        ExtensionServerName(domain),
-        ExtensionSupportedGroups(),
-        ExtensionSignatureAlgorithms(),
-        ExtensionKeyShare(publicKeyBytes),
-        ExtensionPSKKeyExchangeModes(),
-        ExtensionSupportedVersions(),
-      ];
+  List<ClientHelloExtensionParsed> parsedExtensions = [];
+
+  ClientHello({
+    required Uint8List domain,
+    required Uint8List publicKeyBytes,
+    required this.parsedExtensions,
+  }) : recordHeader = RecordHeader(
+         rtype: 0x16,
+         legacyProtoVersion: 0x0303, // FIXED
+         size: 0,
+       ),
+       handshakeHeader = HandshakeHeader(messageType: 1, size: 0),
+       extensions = [
+         ExtensionServerName(domain),
+         ExtensionSupportedGroups(),
+         ExtensionSignatureAlgorithms(),
+         ExtensionKeyShare(publicKeyBytes),
+         ExtensionPSKKeyExchangeModes(),
+         ExtensionSupportedVersions(),
+       ];
+
+  ClientHello._parsed({
+    required this.recordHeader,
+    required this.handshakeHeader,
+    required this.clientRandom,
+    required this.sessionId,
+    required this.cipherSuites,
+    required this.parsedExtensions,
+  }) : extensions = const [];
 
   Uint8List _build() {
     print("📤 Building ClientHello...");
@@ -237,6 +252,115 @@ class ClientHello {
     print("✅ ClientHello READY: ${finalBytes.length} bytes");
 
     return finalBytes;
+  }
+
+  static ClientHello deserialize(ByteReader r) {
+    RecordHeader? rh;
+
+    // Heuristic: if first byte looks like record type handshake(22=0x16),
+    // try parsing RecordHeader. Otherwise assume handshake-only.
+    if (r.remaining >= 5) {
+      final b0 = r.readUint8();
+      r.offset(1); // rewind 1 byte after peek
+      if (b0 == 0x16) {
+        rh = RecordHeader.deserialize(r.readBytes(5));
+      }
+    }
+
+    final hh = HandshakeHeader.deserialize(r.readBytes(4));
+    if (hh.messageType != 0x01) {
+      throw StateError('Expected ClientHello (type=1), got ${hh.messageType}');
+    }
+
+    // Handshake body
+    final legacyVersion = r.readUint16be();
+    if (legacyVersion != 0x0303) {
+      // tolerate but flag
+      // throw StateError('Bad legacy_version: 0x${legacyVersion.toRadixString(16)}');
+    }
+
+    final random = r.readBytes(32);
+
+    final sidLen = r.readUint8();
+    final sid = r.readBytes(sidLen);
+
+    final csLen = r.readUint16be();
+    final cs = r.readBytes(csLen);
+
+    final compLen = r.readUint8();
+    r.readBytes(compLen); // ignore compression methods
+
+    final extTotalLen = r.readUint16be();
+    final extBytes = r.readBytes(extTotalLen);
+    final er = ByteReader(extBytes);
+
+    final parsed = <ClientHelloExtensionParsed>[];
+
+    while (er.remaining >= 4) {
+      final extType = er.readUint16be();
+      final extLen = er.readUint16be();
+      final data = er.readBytes(extLen);
+      final dr = ByteReader(data);
+
+      switch (extType) {
+        case EXT_SERVER_NAME:
+          // server_name_list: u16 listLen, then entries
+          if (dr.remaining < 2) break;
+          final listLen = dr.readUint16be();
+          if (listLen == 0 || dr.remaining < listLen) break;
+
+          // name_type(1) + host_len(2) + host
+          final nameType = dr.readUint8();
+          if (nameType != 0) break;
+          final hostLen = dr.readUint16be();
+          if (dr.remaining < hostLen) break;
+          final host = dr.readBytes(hostLen);
+          parsed.add(ClientHelloServerName(host));
+          break;
+
+        case EXT_KEY_SHARE:
+          // client_shares: u16 listLen, then entries:
+          // group(2) + key_exchange_len(2) + key_exchange
+          if (dr.remaining < 2) break;
+          final listLen = dr.readUint16be();
+          if (listLen == 0 || dr.remaining < listLen) break;
+
+          // take first key share entry
+          if (dr.remaining < 4) break;
+          final group = dr.readUint16be();
+          final kxLen = dr.readUint16be();
+          if (dr.remaining < kxLen) break;
+          final kx = dr.readBytes(kxLen);
+          parsed.add(ClientHelloKeyShare(group: group, keyExchange: kx));
+          break;
+
+        case EXT_SUPPORTED_VERSIONS:
+          // versions: u8 len, then that many bytes, in u16 pairs
+          if (dr.remaining < 1) break;
+          final len = dr.readUint8();
+          final vv = <int>[];
+          final take = len.clamp(0, dr.remaining);
+          final vbr = ByteReader(dr.readBytes(take));
+          while (vbr.remaining >= 2) {
+            vv.add(vbr.readUint16be());
+          }
+          parsed.add(ClientHelloSupportedVersions(vv));
+          break;
+
+        default:
+          // ignore others
+          break;
+      }
+    }
+
+    return ClientHello._parsed(
+      recordHeader: rh!,
+      handshakeHeader: hh,
+      clientRandom: random,
+      sessionId: sid,
+      cipherSuites: cs,
+      parsedExtensions: parsed,
+    );
   }
 
   /// Deserialize either:
@@ -351,4 +475,21 @@ class ClientHello {
   // }
 }
 
+/// Parsed extensions for server-side consumption
+abstract class ClientHelloExtensionParsed {}
 
+class ClientHelloServerName extends ClientHelloExtensionParsed {
+  final Uint8List host;
+  ClientHelloServerName(this.host);
+}
+
+class ClientHelloKeyShare extends ClientHelloExtensionParsed {
+  final int group; // e.g. 0x001D
+  final Uint8List keyExchange; // client public key
+  ClientHelloKeyShare({required this.group, required this.keyExchange});
+}
+
+class ClientHelloSupportedVersions extends ClientHelloExtensionParsed {
+  final List<int> versions; // e.g. [0x0304]
+  ClientHelloSupportedVersions(this.versions);
+}

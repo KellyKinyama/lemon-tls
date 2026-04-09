@@ -1,8 +1,34 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'aead.dart';
 import 'byte_reader.dart';
-import 'handshake_headers.dart';
+import 'handshake_headers2.dart';
 import 'record_header.dart';
+
+Uint8List _u8(int v) => Uint8List.fromList([v & 0xFF]);
+
+Uint8List _u16be(int v) {
+  final out = Uint8List(2);
+  ByteData.sublistView(out).setUint16(0, v & 0xFFFF, Endian.big);
+  return out;
+}
+
+Uint8List _randomBytes(int n) {
+  final rnd = math.Random.secure();
+  return Uint8List.fromList(List.generate(n, (_) => rnd.nextInt(256)));
+}
+
+Uint8List _concat(List<Uint8List> parts) {
+  final total = parts.fold<int>(0, (n, p) => n + p.length);
+  final out = Uint8List(total);
+  var off = 0;
+  for (final p in parts) {
+    out.setRange(off, off + p.length, p);
+    off += p.length;
+  }
+  return out;
+}
 
 final Map<int, ClientHelloExtension Function(ByteReader)> extensionsMap = {
   EXTENSION_KEY_SHARE: (reader) {
@@ -23,62 +49,8 @@ final Map<int, ClientHelloExtension Function(ByteReader)> extensionsMap = {
   },
 };
 
-// class ByteReader {
-//   final Uint8List _data;
-//   int _off = 0;
-
-//   ByteReader(this._data) {
-//     print("[DEBUG] ByteReader created with ${_data.length} bytes");
-//   }
-
-//   int get remaining => _data.length - _off;
-
-//   // int get offset => null;
-
-//   Uint8List peek(int n) {
-//     print("[DEBUG] peek($n) at offset $_off remaining=$remaining");
-//     if (remaining < n) throw StateError('Need more data to peek $n bytes.');
-//     return _data.sublist(_off, _off + n);
-//   }
-
-//   Uint8List readBytes(int n) {
-//     print("[DEBUG] readBytes($n) at offset $_off remaining=$remaining");
-//     if (remaining < n)
-//       throw StateError('Need more data: wanted $n bytes, have $remaining.');
-//     final out = _data.sublist(_off, _off + n);
-//     _off += n;
-//     return out;
-//   }
-
-//   int readUint8() {
-//     final v = readBytes(1)[0];
-//     print("[DEBUG] readUint8 -> $v");
-//     return v;
-//   }
-
-//   int readInt8() {
-//     final v = readUint8();
-//     return v >= 0x80 ? v - 0x100 : v;
-//   }
-
-//   int readUint16be() {
-//     final bytes = readBytes(2);
-//     final value = ByteData.sublistView(bytes).getUint16(0, Endian.big);
-//     print("[DEBUG] readUint16be -> 0x${value.toRadixString(16)}");
-//     return value;
-//   }
-
-//   int readInt16be() {
-//     final bytes = readBytes(2);
-//     final value = ByteData.sublistView(bytes).getInt16(0, Endian.big);
-//     print("[DEBUG] readInt16be -> $value");
-//     return value;
-//   }
-
-//   void offset(int i) {
-//     _off = -i;
-//   }
-// }
+const int _EXT_KEY_SHARE = 0x33;
+const int _EXT_SUPPORTED_VERSIONS = 0x2b;
 
 class ServerHello {
   final RecordHeader recordHeader;
@@ -89,6 +61,11 @@ class ServerHello {
   final int cipherSuite;
   final List<ClientHelloExtension> extensions;
 
+  late Uint8List
+  legacySessionIdEcho; // usually empty in your client, so echo empty
+  late Uint8List
+  extensionsBytes; // raw extension block payload (not incl total length)
+
   ServerHello({
     required this.recordHeader,
     required this.handshakeHeader,
@@ -98,6 +75,19 @@ class ServerHello {
     required this.cipherSuite,
     required this.extensions,
   });
+
+  ServerHello._toy({
+    required this.recordHeader,
+    required this.handshakeHeader,
+    required this.serverRandom,
+    required this.legacySessionIdEcho,
+    required this.cipherSuite,
+    required Uint8List extensionsBytes,
+  }) : serverVersion = 0x0303,
+       sessionId = legacySessionIdEcho,
+       extensions = const [] {
+    this.extensionsBytes = extensionsBytes;
+  }
 
   static ServerHello deserialize(ByteReader byteStream) {
     print("===== BEGIN ServerHello =====");
@@ -175,6 +165,112 @@ class ServerHello {
       cipherSuite: cipherSuite,
       extensions: exts,
     );
+  }
+
+  static ServerHello buildForToyServer({
+    required Uint8List keySharePublic, // 32 bytes X25519 pubkey
+    required CipherSuite cipherSuite,
+  }) {
+    final cipher = switch (cipherSuite) {
+      CipherSuite.aes128gcm => 0x1301,
+      // CipherSuite.aes256gcm => 0x1302,
+      CipherSuite.chacha20poly1305 => 0x1303,
+    };
+
+    // key_share ext payload:
+    //   group(2)=0x001d, kx_len(2), kx
+    final keySharePayload = _concat([
+      _u16be(0x001D),
+      _u16be(keySharePublic.length),
+      keySharePublic,
+    ]);
+    final keyShareExt = _concat([
+      _u16be(_EXT_KEY_SHARE),
+      _u16be(keySharePayload.length),
+      keySharePayload,
+    ]);
+
+    // supported_versions ext payload for ServerHello = selected_version(u16)=0x0304
+    final suppVerPayload = _u16be(0x0304);
+    final suppVerExt = _concat([
+      _u16be(_EXT_SUPPORTED_VERSIONS),
+      _u16be(suppVerPayload.length),
+      suppVerPayload,
+    ]);
+
+    final exts = _concat([keyShareExt, suppVerExt]);
+
+    final rh = RecordHeader(
+      rtype: 0x16, // handshake record
+      legacyProtoVersion: 0x0303,
+      size: 0,
+    );
+    final hh = HandshakeHeader(messageType: 2, size: 0);
+
+    final tmp = _concat([
+      rh.serialize(),
+      hh.serialize(),
+      _u16be(0x0303), // legacy_version
+      _randomBytes(32),
+      _u8(0), // session_id_echo length
+      // session_id_echo bytes (none)
+      _u16be(cipher),
+      _u8(0), // compression_method
+      _u16be(exts.length),
+      exts,
+    ]);
+
+    rh.size = tmp.length - 5;
+    hh.size = rh.size - 4;
+
+    return ServerHello._toy(
+      recordHeader: rh,
+      handshakeHeader: hh,
+      serverRandom: tmp.sublist(11, 11 + 32), // not used elsewhere
+      legacySessionIdEcho: Uint8List(0),
+      cipherSuite: cipher,
+      extensionsBytes: exts,
+    );
+  }
+
+  Uint8List serialize() {
+    // Build extension block bytes.
+    // If built via buildForToyServer(), extensionsBytes is already set.
+    Uint8List exts;
+    if ((extensionsBytes is Uint8List) && extensionsBytes.isNotEmpty) {
+      exts = extensionsBytes;
+    } else {
+      // Fallback: try to serialize from parsed extensions list if present.
+      // NOTE: In this file extensions are ClientHelloExtension, which in your codebase
+      // appears to include (type, data) and/or serialize(); adjust if needed.
+      final parts = <Uint8List>[];
+      for (final e in extensions) {
+        // If your ClientHelloExtension has serialize() returning full ext
+        // (type+len+data), this works.
+        parts.add(e.serialize());
+      }
+      exts = _concat(parts);
+      extensionsBytes = exts;
+    }
+
+    final body = _concat([
+      _u16be(serverVersion), // legacy_version (0x0303)
+      (serverRandom.length == 32) ? serverRandom : _randomBytes(32),
+      _u8(sessionId.length),
+      sessionId,
+      _u16be(cipherSuite),
+      _u8(0), // compression_method
+      _u16be(exts.length),
+      exts,
+    ]);
+
+    // Update header sizes
+    handshakeHeader.size = body.length;
+    final handshakeMsg = _concat([handshakeHeader.serialize(), body]);
+
+    recordHeader.size = handshakeMsg.length;
+
+    return _concat([recordHeader.serialize(), handshakeMsg]);
   }
 }
 

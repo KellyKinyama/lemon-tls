@@ -1,335 +1,309 @@
-// ============================================================================
-// TLS 1.3 TOY SERVER (compatible with your TLS13Session client)
-// Idiomatic Dart — minimal subset of RFC 8446
-// ============================================================================
-
+// filepath: /c:/www/dart/lemon-tls/lib/tls13/tls_server_session.dart
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:convert';
 
-import 'tls_constants.dart';
-import 'tls_hello.dart';
-import 'tls_extensions.dart';
-import 'tls_certificate.dart';
-import 'tls_certificate_verify.dart';
-import 'tls_keyshare.dart';
-import 'tls_record_layer.dart';
-import 'tls13_keyshcedule.dart';
+import 'package:async/async.dart';
 
-import '../hkdf.dart';
-import '../hash.dart';
-import '../crypto.dart';
+import 'aead.dart';
+import 'byte_reader.dart';
+import 'change_cipher_suite.dart';
+import 'client_hello4.dart'; // must be able to deserialize ClientHello
+import 'crypto.dart';
+import 'handshake_headers2.dart';
+import 'hash.dart';
+import 'hkdf.dart';
+import 'record_header.dart';
+import 'server_hello2.dart';
+import 'wrapper.dart';
 
-// ============================================================================
-// Utility: NOT cryptographically secure random
-// ============================================================================
-Uint8List _rand(int n) {
-  final out = Uint8List(n);
-  final t = DateTime.now().microsecondsSinceEpoch;
-  for (int i = 0; i < n; i++) {
-    out[i] = (t >> (i % 8)) & 0xFF;
+class _PeekableBuffer {
+  Uint8List _buf = Uint8List(0);
+  int _off = 0;
+
+  int get length => _buf.length - _off;
+
+  Uint8List peek([int? n]) {
+    final avail = length;
+    final take = n == null ? avail : (n <= avail ? n : avail);
+    return _buf.sublist(_off, _off + take);
   }
-  return out;
-}
 
-Uint8List _hs(int type, Uint8List body) {
-  final L = body.length;
-  return Uint8List.fromList([
-    type,
-    (L >> 16) & 0xFF,
-    (L >> 8) & 0xFF,
-    L & 0xFF,
-    ...body
-  ]);
-}
-
-// ============================================================================
-// PARSED CLIENTHELLO STRUCT (minimal)
-// ============================================================================
-class ParsedCH {
-  final Uint8List random;
-  final Uint8List keyShare;
-  final int group;
-
-  ParsedCH(this.random, this.keyShare, this.group);
-}
-
-// ============================================================================
-// TLS 1.3 SERVER SESSION
-// ============================================================================
-
-class Tls13ServerSession {
-  final Uint8List serverCert;     // DER
-  final Uint8List serverPrivKey;  // Raw EC private key
-
-  // Transcript nodes
-  late Uint8List h1;
-  late Uint8List h2;
-  late Uint8List h3;
-  late Uint8List h4;
-
-  late Uint8List clientHelloHS;
-  late Uint8List serverHelloHS;
-
-  late Tls13KeySchedule ks;
-  late TlsRecordLayer record;
-
-  late Uint8List sharedSecret;
-
-  bool handshakeDone = false;
-
-  Tls13ServerSession({
-    required this.serverCert,
-    required this.serverPrivKey,
-  });
-
-  // ==========================================================================
-  // STEP 1 — PARSE CLIENTHELLO
-  // ==========================================================================
-
-  ParsedCH parseClientHello(ByteReader r) {
-    // record header already removed by socket handler
-    final hh = HandshakeHeader.deserialize(r.readBytes(4));
-    if (hh.messageType != HandshakeType.clientHello) {
-      throw Exception("Expected ClientHello");
+  Uint8List read(int n) {
+    if (length < n) throw StateError('Need more data');
+    final out = _buf.sublist(_off, _off + n);
+    _off += n;
+    if (_off == _buf.length) {
+      _buf = Uint8List(0);
+      _off = 0;
     }
-
-    final body = r.readBytes(hh.size);
-    clientHelloHS = _hs(HandshakeType.clientHello, body);
-
-    final ch = parseHello(TLSMessageType.CLIENT_HELLO, body);
-    final exts = ch["extensions"] as List;
-
-    // Random
-    final random = body.sublist(2, 34);
-
-    // KeyShare
-    final ksExt = exts.firstWhere((e) => e["type"] == TLSExt.KEY_SHARE);
-    final entries = ksExt["value"] as List;
-    final entry = entries.first;
-    final group = entry["group"];
-    final clientPub = entry["key_exchange"] as Uint8List;
-
-    print("🔍 Parsed ClientHello: group=$group, pub=${clientPub.length} bytes");
-
-    return ParsedCH(random, clientPub, group);
+    return out;
   }
 
-  // ==========================================================================
-  // STEP 2 — BUILD SERVERHELLO
-  // ==========================================================================
-
-  Uint8List buildServerHello(ParsedCH ch) {
-    // Generate server key share
-    final sk = Tls13KeyShare.generate(
-      group: ch.group,
-      clientPublicKey: ch.keyShare,
-    );
-
-    sharedSecret = sk.sharedSecret;
-
-    final helloBody = buildHello(
-      "server",
-      {
-        "random": _rand(32),
-        "cipher_suite": CipherSuite.tlsAes128GcmSha256,
-        "session_id": Uint8List(0),
-        "extensions": [
-          {"type": TLSExt.SUPPORTED_VERSIONS, "value": TLSVersion.TLS1_3},
-          {
-            "type": TLSExt.KEY_SHARE,
-            "value": {"group": ch.group, "key_exchange": sk.publicKey}
-          }
-        ]
-      },
-    );
-
-    serverHelloHS = _hs(HandshakeType.serverHello, helloBody);
-
-    // Transcript hash h1 = CH + SH
-    h1 = createHash(Uint8List.fromList([
-      ...clientHelloHS,
-      ...serverHelloHS,
-    ]));
-
-    print("📘 Built ServerHello (CipherSuite=0x1301)");
-
-    // KeySchedule
-    ks = Tls13KeySchedule();
-    ks.computeHandshakeSecrets(sharedSecret: sharedSecret, helloHash: h1);
-
-    record = TlsRecordLayer();
-    record.setHandshakeKeys(
-      clientKey: ks.clientHandshakeKey,
-      clientIV: ks.clientHandshakeIV,
-      serverKey: ks.serverHandshakeKey,
-      serverIV: ks.serverHandshakeIV,
-    );
-
-    return serverHelloHS;
-  }
-
-  // ==========================================================================
-  // STEP 3 — ENCRYPTED EXTENSIONS
-  // ==========================================================================
-  Uint8List buildEncryptedExtensions() {
-    final body = buildExtensions([]);
-    final hs = _hs(HandshakeType.encryptedExtensions, body);
-
-    h2 = createHash(Uint8List.fromList([...h1, ...hs]));
-
-    print("📘 Built EncryptedExtensions");
-
-    return record.encrypt(hs);
-  }
-
-  // ==========================================================================
-  // STEP 4 — CERTIFICATE
-  // ==========================================================================
-  Uint8List buildCertificate() {
-    final body = buildCertificateMessage({
-      "request_context": Uint8List(0),
-      "entries": [
-        {"cert": serverCert, "extensions": []},
-      ]
-    });
-
-    final hs = _hs(HandshakeType.certificate, body);
-    h3 = createHash(Uint8List.fromList([...h2, ...hs]));
-
-    print("📘 Built Certificate");
-
-    return record.encrypt(hs);
-  }
-
-  // ==========================================================================
-  // STEP 5 — CERTIFICATEVERIFY
-  // ==========================================================================
-  Uint8List buildCertificateVerify() {
-    final body = buildCertificateVerifyMessage(
-      privateKey: serverPrivKey,
-      transcriptHash: h3,
-    );
-
-    final hs = _hs(HandshakeType.certificateVerify, body);
-    h4 = createHash(Uint8List.fromList([...h3, ...hs]));
-
-    print("📘 Built CertificateVerify");
-
-    return record.encrypt(hs);
-  }
-
-  // ==========================================================================
-  // STEP 6 — FINISHED
-  // ==========================================================================
-  Uint8List buildFinished() {
-    final finishedKey = hkdfExpandLabel(
-      ks.serverHandshakeTrafficSecret,
-      Uint8List(0),
-      "finished",
-      32,
-    );
-
-    final verifyData = hmacSha256(finishedKey, h4);
-    final hs = _hs(HandshakeType.finished, verifyData);
-
-    final appHash =
-        createHash(Uint8List.fromList([...h4, ...hs])); // TH4 for app keys
-    ks.computeApplicationSecrets(appHash);
-
-    handshakeDone = true;
-
-    print("📘 Built Finished");
-
-    return record.encrypt(hs);
+  void append(Uint8List data) {
+    if (data.isEmpty) return;
+    final remain = peek();
+    final out = Uint8List(remain.length + data.length);
+    out.setRange(0, remain.length, remain);
+    out.setRange(remain.length, out.length, data);
+    _buf = out;
+    _off = 0;
   }
 }
 
-// ============================================================================
-// SERVER LOOP (TCP)
-// ============================================================================
+/// Toy TLS 1.3 server session meant to interop with THIS repo's toy client.
+///
+/// Not a general TLS server: no certificates, no signature auth, no ALPN, etc.
+class TLS13ServerSession {
+  final Socket _socket;
+  late final StreamQueue<Uint8List> _queue;
 
-class Tls13Server {
-  final int port;
-  final Uint8List cert;
-  final Uint8List privKey;
+  final BytesBuilder _transcript = BytesBuilder(copy: false);
 
-  Tls13Server(this.port, this.cert, this.privKey);
+  final CipherSuite cipherSuite;
+  late final Aead _aead;
 
-  Future<void> start() async {
-    final server = await ServerSocket.bind(InternetAddress.anyIPv4, port);
-    print("🚀 TLS 1.3 Toy Server running on port $port");
+  final KeyPair keyPair;
 
-    await for (final sock in server) {
-      _handle(sock);
-    }
+  HandshakeKeys? handshakeKeys;
+  ApplicationKeys? applicationKeys;
+
+  int hsSend = 0;
+  int hsRecv = 0;
+  int appSend = 0;
+  int appRecv = 0;
+
+  TLS13ServerSession(
+    this._socket, {
+    this.cipherSuite = CipherSuite.aes128gcm,
+    KeyPair? keyPair,
+  }) : keyPair = keyPair ?? KeyPair.generate() {
+    _queue = StreamQueue(_socket);
+    _aead = Aead(cipherSuite);
   }
 
-  Future<void> _handle(Socket sock) async {
-    print("🔗 Client connected: ${sock.remoteAddress.address}");
+  Future<void> handshake() async {
+    final buf = _PeekableBuffer();
+    buf.append(await _recv());
 
-    final session = Tls13ServerSession(
-      certificate: cert,
-      privateKey: privKey,
+    // 1) Read ClientHello record and add to transcript (handshake bytes only).
+    final clientHelloBytes = await _recvClientHelloBytes(buf);
+    _transcript.add(clientHelloBytes); // already excludes record header
+
+    final ch = ClientHello.deserialize(ByteReader(clientHelloBytes));
+    final clientKeyShare = ch.parsedExtensions
+        .whereType<ClientHelloKeyShare>()
+        .first; // will throw if missing, but now it’s the right list
+
+    final sharedSecret = keyPair.exchange(clientKeyShare.keyExchange);
+
+    // 2) Send ServerHello (record) and add handshake bytes to transcript.
+    final sh = ServerHello.buildForToyServer(
+      // You must implement this builder to match your existing ServerHello serializer.
+      // It should include supported_versions + key_share, and select cipher_suite.
+      keySharePublic: keyPair.publicKeyBytes,
+      cipherSuite: cipherSuite,
     );
+    final shBytes = sh.serialize(); // includes record header
+    _socket.add(shBytes);
+    await _socket.flush();
 
-    // STEP 1: Receive ClientHello record
-    final firstRecord = await sock.first;
-    print("📥 Got ClientHello record (${firstRecord.length} bytes)");
+    // add handshake message bytes (excluding record header) to transcript
+    _transcript.add(shBytes.sublist(5));
 
-    final reader = ByteReader(firstRecord);
-    final recHeader = RecordHeader.deserialize(reader.readBytes(5));
-    final recBody = reader.readBytes(recHeader.size);
+    // 3) Derive handshake keys using transcript hash after CH+SH
+    final helloHash = sha256(_transcript.toBytes());
+    handshakeKeys = keyPair.derive(sharedSecret, helloHash);
 
-    final ch = session.parseClientHello(ByteReader(recBody));
+    // 4) Send (encrypted) EncryptedExtensions + Finished.
+    // In a real server, you would send Certificate/CertificateVerify too.
+    final encryptedHandshake = _buildServerEncryptedFlight(helloHash);
+    await _sendHandshakeCiphertext(encryptedHandshake);
 
-    // STEP 2: Send ServerHello
-    final sh = session.buildServerHello(ch);
-    sock.add(sh);
+    // 5) Read client's Finished under handshake keys, verify, then derive app keys.
+    final clientFinishedMsg = await _recvHandshakeFinished(buf);
+    _transcript.add(clientFinishedMsg); // add plaintext handshake message
+    final handshakeHash = sha256(_transcript.toBytes());
 
-    // STEP 3: EncryptedExtensions
-    sock.add(session.buildEncryptedExtensions());
+    applicationKeys = keyPair.deriveApplicationKeys(
+      handshakeKeys!.handshakeSecret,
+      handshakeHash,
+    );
+  }
 
-    // STEP 4: Certificate
-    sock.add(session.buildCertificate());
-
-    // STEP 5: CertificateVerify
-    sock.add(session.buildCertificateVerify());
-
-    // STEP 6: Finished
-    sock.add(session.buildFinished());
-    await sock.flush();
-    print("✅ Handshake complete.");
-
-    // ======================================================================
-    // APPLICATION DATA PHASE
-    // ======================================================================
+  /// Receive one decrypted application-data fragment (skips post-handshake handshake).
+  Future<Uint8List> recv() async {
+    if (applicationKeys == null) throw StateError('handshake not complete');
+    final buf = _PeekableBuffer();
 
     while (true) {
-      try {
-        final rec = await sock.first;
-        final msg = session.record.decryptApp(
-          rec,
-          session.ks.serverAppKey,
-          session.ks.serverAppIV,
-        );
+      final w = await _recvWrapper(buf);
 
-        print("📩 Received app data: ${utf8.decode(msg)}");
+      final pt = _aead.decrypt(
+        key: applicationKeys!.clientKey, // client->server direction
+        nonce: xorIv(applicationKeys!.clientIv, appRecv),
+        aad: w.recordHeader.serialize(),
+        ciphertext: w.payload,
+      );
+      appRecv++;
 
-        final reply = utf8.encode("OK") as Uint8List;
-        final out = session.record.encryptApp(
-          reply,
-          session.ks.clientAppKey,
-          session.ks.clientAppIV,
-        );
-        sock.add(out);
-        await sock.flush();
-      } catch (e) {
-        print("❌ App data error: $e");
-        break;
+      if (pt.isEmpty) continue;
+      final innerType = pt.last;
+      final content = pt.sublist(0, pt.length - 1);
+
+      if (innerType == 0x17) return content; // application_data
+      if (innerType == 0x16) continue; // ignore post-handshake handshake
+      if (innerType == 0x15) return Uint8List(0); // alert => treat as EOF (toy)
+    }
+  }
+
+  Future<void> send(Uint8List data) async {
+    if (applicationKeys == null) throw StateError('handshake not complete');
+
+    final plain = Uint8List.fromList([...data, 0x17]);
+    final record = RecordHeader(rtype: 0x17, size: plain.length + 16);
+
+    final ct = _aead.encrypt(
+      key: applicationKeys!.serverKey, // server->client direction
+      nonce: xorIv(applicationKeys!.serverIv, appSend),
+      aad: record.serialize(),
+      plaintext: plain,
+    );
+    appSend++;
+
+    final w = Wrapper(recordHeader: record, payload: ct);
+    _socket.add(w.serialize());
+    await _socket.flush();
+  }
+
+  Future<void> close() async {
+    await _socket.close();
+  }
+
+  // ---------------- internal recv helpers ----------------
+
+  Future<Uint8List> _recv() async => Uint8List.fromList(await _queue.next);
+
+  Future<void> _ensure(_PeekableBuffer buf, int n) async {
+    while (buf.length < n) {
+      final more = await _recv();
+      if (more.isEmpty) throw StateError('connection closed');
+      buf.append(more);
+    }
+  }
+
+  Future<Wrapper> _recvWrapper(_PeekableBuffer buf) async {
+    await _ensure(buf, 5);
+    final rh = RecordHeader.deserialize(buf.peek(5));
+    await _ensure(buf, 5 + rh.size);
+    final bytes = buf.read(5 + rh.size);
+    return Wrapper.deserialize(ByteReader(bytes));
+  }
+
+  /// Returns the raw Handshake message bytes of ClientHello (header+body), excluding record header.
+  Future<Uint8List> _recvClientHelloBytes(_PeekableBuffer buf) async {
+    await _ensure(buf, 5);
+    final rh = RecordHeader.deserialize(buf.peek(5));
+    await _ensure(buf, 5 + rh.size);
+    final rec = buf.read(5 + rh.size);
+    // rec = recordHeader(5) + handshake(...)
+    return rec.sublist(5);
+  }
+
+  Uint8List _buildServerEncryptedFlight(Uint8List helloHash) {
+    // Toy: only send Finished (optionally you could include EncryptedExtensions).
+    final finishedKey = hkdfExpandLabel(
+      secret: handshakeKeys!.serverHandshakeTrafficSecret,
+      label: 'finished',
+      context: Uint8List(0),
+      length: 32,
+    );
+    final verifyData = hmacSha256(key: finishedKey, data: helloHash);
+
+    final hh = HandshakeHeader(messageType: 0x14, size: verifyData.length);
+    final finishedMsg = Uint8List.fromList([...hh.serialize(), ...verifyData]);
+
+    // IMPORTANT: transcript includes plaintext handshake messages in order.
+    _transcript.add(finishedMsg);
+
+    return finishedMsg;
+  }
+
+  Future<void> _sendHandshakeCiphertext(
+    Uint8List handshakePlaintextMsgs,
+  ) async {
+    // wrap plaintext handshake bytes as TLSInnerPlaintext + content_type=handshake(0x16)
+    final plain = Uint8List.fromList([...handshakePlaintextMsgs, 0x16]);
+    final record = RecordHeader(rtype: 0x17, size: plain.length + 16);
+
+    final ct = _aead.encrypt(
+      key: handshakeKeys!.serverKey,
+      nonce: xorIv(handshakeKeys!.serverIv, hsSend),
+      aad: record.serialize(),
+      plaintext: plain,
+    );
+    hsSend++;
+
+    final w = Wrapper(recordHeader: record, payload: ct);
+    _socket.add(w.serialize());
+    await _socket.flush();
+  }
+
+  /// Reads encrypted handshake records until it finds client's Finished, verifies it, and returns the plaintext Finished message bytes.
+  Future<Uint8List> _recvHandshakeFinished(_PeekableBuffer buf) async {
+    while (true) {
+      final w = await _recvWrapper(buf);
+
+      final pt = _aead.decrypt(
+        key: handshakeKeys!.clientKey,
+        nonce: xorIv(handshakeKeys!.clientIv, hsRecv),
+        aad: w.recordHeader.serialize(),
+        ciphertext: w.payload,
+      );
+      hsRecv++;
+
+      if (pt.isEmpty) continue;
+      if (pt.last != 0x16) continue; // want handshake
+
+      final fragment = pt.sublist(0, pt.length - 1);
+      final r = ByteReader(fragment);
+
+      while (r.remaining >= 4) {
+        final headerBytes = r.readBytes(4);
+        final hh = HandshakeHeader.deserialize(headerBytes);
+        if (r.remaining < hh.size) break;
+
+        final payload = r.readBytes(hh.size);
+
+        if (hh.messageType == 0x14) {
+          // verify client's Finished against transcript hash so far (excluding this Finished)
+          final handshakeHash = sha256(_transcript.toBytes());
+
+          final finishedKey = hkdfExpandLabel(
+            secret: handshakeKeys!.clientHandshakeTrafficSecret,
+            label: 'finished',
+            context: Uint8List(0),
+            length: 32,
+          );
+          final expected = hmacSha256(key: finishedKey, data: handshakeHash);
+
+          if (!_constantTimeEqual(payload, expected)) {
+            throw StateError('client Finished verify failed');
+          }
+
+          return Uint8List.fromList([...headerBytes, ...payload]);
+        }
       }
     }
+  }
 
-    await sock.close();
+  bool _constantTimeEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'byte_reader.dart';
 import 'record_header.dart' show RecordHeader;
 import 'server_hello.dart';
 

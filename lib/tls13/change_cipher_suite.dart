@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:lemon_tls/tls13/server_hello.dart';
 
+import 'byte_reader.dart';
 import 'record_header.dart' show RecordHeader;
 
 /// Minimal reader interface (compatible with the ByteReader used elsewhere).

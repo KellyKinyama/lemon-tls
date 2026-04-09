@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:async/async.dart';
 
+import 'byte_reader.dart';
 import 'client_hello.dart';
 import 'server_hello.dart';
 import 'record_header.dart';
