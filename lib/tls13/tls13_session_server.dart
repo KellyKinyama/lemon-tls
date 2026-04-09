@@ -206,18 +206,17 @@ class TLS13ServerSession {
     _logBytes('DEBUG server client hs key', handshakeKeys!.clientKey, max: 64);
     _logBytes('DEBUG server client hs iv', handshakeKeys!.clientIv, max: 64);
 
+    final ccs = Uint8List.fromList([0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+    _logBytes('SERVER -> CLIENT ChangeCipherSpec (compat)', ccs, max: 64);
+    _socket.add(ccs);
+    await _socket.flush();
+
     // 4) Send encrypted handshake messages as separate records: EE then Finished.
     // 4) Send EE
+    // Replace the "send EE record" + "send Finished record" with:
     final ee = _hs(0x08, _buildEncryptedExtensionsBody());
     _transcript.add(ee);
-    _logBytes('SERVER handshake plaintext: EncryptedExtensions', ee);
-    await _sendHandshakeCiphertext(ee);
 
-    // Force the client to process the first record before the second arrives.
-    // (Workaround for any client-side buffering/ordering bug.)
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-
-    // 5) Send Finished
     final transcriptHashForFinished = sha256(_transcript.toBytes());
     final finishedKey = hkdfExpandLabel(
       secret: handshakeKeys!.serverHandshakeTrafficSecret,
@@ -232,8 +231,11 @@ class TLS13ServerSession {
 
     final fin = _hs(0x14, verifyData);
     _transcript.add(fin);
-    _logBytes('SERVER handshake plaintext: Finished', fin);
-    await _sendHandshakeCiphertext(fin);
+
+    final flight = Uint8List.fromList([...ee, ...fin]);
+
+    _logBytes('SERVER handshake plaintext flight (EE+Finished)', flight);
+    await _sendHandshakeCiphertext(flight);
 
     // 5) Read client's Finished, verify, then derive application keys.
     final clientFinishedMsg = await _recvHandshakeFinished(buf);
@@ -248,6 +250,9 @@ class TLS13ServerSession {
       handshakeKeys!.handshakeSecret,
       handshakeHash,
     );
+
+    appRecv = 0;
+    appSend = 0;
   }
 
   /// Receive one decrypted application-data fragment (skips post-handshake handshake).
@@ -315,16 +320,37 @@ class TLS13ServerSession {
     }
   }
 
+  // Future<Wrapper> _recvWrapper(_PeekableBuffer buf) async {
+  //   await _ensure(buf, 5);
+  //   final rh = RecordHeader.deserialize(buf.peek(5));
+  //   await _ensure(buf, 5 + rh.size);
+  //   final bytes = buf.read(5 + rh.size);
+  //   return Wrapper.deserialize(ByteReader(bytes));
+  // }
   Future<Wrapper> _recvWrapper(_PeekableBuffer buf) async {
-    await _ensure(buf, 5);
-    final rh = RecordHeader.deserialize(buf.peek(5));
-    await _ensure(buf, 5 + rh.size);
-    final bytes = buf.read(5 + rh.size);
-    return Wrapper.deserialize(ByteReader(bytes));
+    while (true) {
+      await _ensure(buf, 5);
+      final rh = RecordHeader.deserialize(buf.peek(5));
+      await _ensure(buf, 5 + rh.size);
+
+      final bytes = buf.read(5 + rh.size);
+
+      // Ignore ChangeCipherSpec (compat) records (plaintext) per TLS 1.3.
+      if (rh.rtype == 0x14) {
+        _logBytes(
+          'SERVER <- CLIENT ChangeCipherSpec (ignored)',
+          bytes,
+          max: 64,
+        );
+        continue;
+      }
+
+      return Wrapper.deserialize(ByteReader(bytes));
+    }
   }
 
-  /// Returns the raw Handshake message bytes of ClientHello (header+body), excluding record header.
-
+  /// Returns the raw Handshake message bytes of ClientHello (header+body),
+  /// excluding record header.
   Future<Uint8List> _recvClientHelloBytes(_PeekableBuffer buf) async {
     await _ensure(buf, 5);
     final rh = RecordHeader.deserialize(buf.peek(5));
@@ -361,58 +387,29 @@ class TLS13ServerSession {
   Future<void> _sendHandshakeCiphertext(
     Uint8List handshakePlaintextMsgs,
   ) async {
-    // TLSInnerPlaintext = content || type (no padding for toy)
     final plain = Uint8List.fromList([...handshakePlaintextMsgs, 0x16]);
 
-    final nonce = xorIv(handshakeKeys!.serverIv, hsSend);
+    final record = RecordHeader(rtype: 0x17, size: plain.length + 16);
+    final aad = record.serialize();
 
-    // AES-GCM => ciphertext = plaintext + 16-byte tag
+    _logBytes(
+      'SERVER handshake flight (handshake bytes only)',
+      handshakePlaintextMsgs,
+    );
+    stdout.writeln(
+      'SERVER sending handshake TLSCiphertext: innerPlain=${plain.length} ct=${plain.length + 16} record.size=${record.size}',
+    );
+
     final ct = _aead.encrypt(
       key: handshakeKeys!.serverKey,
-      nonce: nonce,
-      aad: Uint8List(0), // placeholder, replaced below
+      nonce: xorIv(handshakeKeys!.serverIv, hsSend),
+      aad: aad,
       plaintext: plain,
     );
-
-    // Build TLSCiphertext record header ourselves:
-    // struct { ContentType(23)=0x17, ProtocolVersion(0x0303), length } TLSCiphertext;
-    final len = ct.length;
-    final header = Uint8List.fromList([
-      0x17,
-      0x03,
-      0x03,
-      (len >> 8) & 0xff,
-      len & 0xff,
-    ]);
-
-    // Now re-encrypt with correct AAD (the header)
-    final ct2 = _aead.encrypt(
-      key: handshakeKeys!.serverKey,
-      nonce: nonce,
-      aad: header,
-      plaintext: plain,
-    );
-
-    // Sanity checks
-    if (ct2.length != plain.length + 16) {
-      throw StateError(
-        'bad aead: ctLen=${ct2.length} plainLen=${plain.length}',
-      );
-    }
-    final out = Uint8List(header.length + ct2.length);
-    out.setRange(0, 5, header);
-    out.setRange(5, out.length, ct2);
-
-    _logBytes('SERVER handshake TLSInnerPlaintext', plain);
-    _logBytes('SERVER handshake record header (AAD)', header);
-    _logBytes('SERVER handshake ciphertext (payload only)', ct2);
-    _logBytes(
-      'SERVER -> CLIENT encrypted handshake record (full)',
-      out,
-      max: 128,
-    );
-
     hsSend++;
+
+    final w = Wrapper(recordHeader: record, payload: ct);
+    final out = w.serialize();
 
     _socket.add(out);
     await _socket.flush();
