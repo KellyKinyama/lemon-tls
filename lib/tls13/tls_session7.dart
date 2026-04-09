@@ -22,6 +22,23 @@ import 'handshake_headers.dart';
 import 'crypto.dart';
 import 'aead.dart';
 
+String _hex(Uint8List b, {int max = 64}) {
+  final take = b.length < max ? b.length : max;
+  final sb = StringBuffer();
+  for (var i = 0; i < take; i++) {
+    if (i > 0) sb.write(i % 16 == 0 ? '\n' : ' ');
+    sb.write(b[i].toRadixString(16).padLeft(2, '0'));
+  }
+  if (take != b.length) sb.write('\n... (${b.length} bytes total)');
+  return sb.toString();
+}
+
+void _logBytes(String label, Uint8List bytes, {int max = 64}) {
+  print('--- $label (${bytes.length} bytes) ---');
+  print(_hex(bytes, max: max));
+  print('--- end $label ---');
+}
+
 class HandshakeFinishedHandshakePayload {
   int get defaultHType => 0x14;
   final Uint8List verifyData;
@@ -138,6 +155,21 @@ class TLS13Session {
     final sharedSecret = keyPair.exchange(serverKeyShare.keyExchange);
 
     handshakeKeys = keyPair.derive(sharedSecret, sha256(_helloHash.toBytes()));
+
+    // DEBUG: dump handshake material (compare with server logs)
+    // _logBytes('DEBUG client helloHash', helloHash);
+    _logBytes(
+      'DEBUG client s_hs_traffic_secret',
+      handshakeKeys!.serverHandshakeTrafficSecret,
+    );
+    _logBytes(
+      'DEBUG client c_hs_traffic_secret',
+      handshakeKeys!.clientHandshakeTrafficSecret,
+    );
+    _logBytes('DEBUG client server hs key', handshakeKeys!.serverKey);
+    _logBytes('DEBUG client server hs iv', handshakeKeys!.serverIv);
+    _logBytes('DEBUG client client hs key', handshakeKeys!.clientKey);
+    _logBytes('DEBUG client client hs iv', handshakeKeys!.clientIv);
 
     ChangeCipherSuite? sccs;
     try {
