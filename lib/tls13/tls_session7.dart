@@ -289,10 +289,66 @@ class TLS13Session {
   // ==========================================================================
 
   /// ---------------- RECEIVE APPLICATION DATA (with NST support) ----------------
+  // Future<Uint8List> recv() async {
+  //   while (true) {
+  //     final buf = PeekableBuffer();
+  //     buf.append(await _recv());
+
+  //     final w = await _recvWrapper(buf);
+
+  //     final plaintext = _aead.decrypt(
+  //       key: applicationKeys!.serverKey,
+  //       nonce: xorIv(applicationKeys!.serverIv, appRecv),
+  //       aad: w.recordHeader.serialize(),
+  //       ciphertext: w.payload,
+  //     );
+
+  //     appRecv++;
+
+  //     // strip TLSInnerPlaintext.content_type (last byte)
+  //     final body = plaintext.sublist(0, plaintext.length - 1);
+
+  //     // ============================================================
+  //     // ✅ HANDLE NEW SESSION TICKET (HandshakeType = 4)
+  //     // ============================================================
+  //     if (body.isNotEmpty && body[0] == 0x04) {
+  //       print("🎫 Received NewSessionTicket — ignoring.");
+  //       continue; // wait for next record
+  //     }
+
+  //     // ============================================================
+  //     // ✅ HANDLE KEY UPDATE (HandshakeType = 24)
+  //     // ============================================================
+  //     if (body.isNotEmpty && body[0] == 0x18) {
+  //       print("🔁 Received KeyUpdate — ignoring for toy client.");
+  //       continue;
+  //     }
+
+  //     // ============================================================
+  //     // ✅ HANDLE POST-HANDSHAKE CERTIFICATE REQUEST (very rare)
+  //     // ============================================================
+  //     if (body.isNotEmpty && body[0] == 0x0D) {
+  //       print("📜 Received post-handshake CertificateRequest — ignoring.");
+  //       continue;
+  //     }
+
+  //     // ============================================================
+  //     // ✅ OTHERWISE THIS IS APPLICATION DATA
+  //     // ============================================================
+  //     return body;
+  //   }
+  // }
+
   Future<Uint8List> recv() async {
+    final buf = PeekableBuffer();
+
     while (true) {
-      final buf = PeekableBuffer();
-      buf.append(await _recv());
+      // Ensure there is at least one record in the buffer.
+      while (buf.length < 5) {
+        final more = await _recv();
+        if (more.isEmpty) return Uint8List(0); // EOF
+        buf.append(more);
+      }
 
       final w = await _recvWrapper(buf);
 
@@ -302,40 +358,60 @@ class TLS13Session {
         aad: w.recordHeader.serialize(),
         ciphertext: w.payload,
       );
-
       appRecv++;
 
-      // strip TLSInnerPlaintext.content_type (last byte)
-      final body = plaintext.sublist(0, plaintext.length - 1);
+      if (plaintext.isEmpty) continue;
 
-      // ============================================================
-      // ✅ HANDLE NEW SESSION TICKET (HandshakeType = 4)
-      // ============================================================
-      if (body.isNotEmpty && body[0] == 0x04) {
-        print("🎫 Received NewSessionTicket — ignoring.");
-        continue; // wait for next record
+      // TLSInnerPlaintext = content || type (last byte)
+      final innerType = plaintext.last;
+      final content = plaintext.sublist(0, plaintext.length - 1);
+
+      // Application Data
+      if (innerType == 0x17) {
+        return content;
       }
 
-      // ============================================================
-      // ✅ HANDLE KEY UPDATE (HandshakeType = 24)
-      // ============================================================
-      if (body.isNotEmpty && body[0] == 0x18) {
-        print("🔁 Received KeyUpdate — ignoring for toy client.");
-        continue;
+      // Post-handshake Handshake messages (NewSessionTicket, KeyUpdate, etc.)
+      if (innerType == 0x16) {
+        if (content.isEmpty) continue;
+
+        // content may contain one or more handshake messages.
+        final r = ByteReader(content);
+        while (r.remaining >= 4) {
+          final hh = HandshakeHeader.deserialize(r.readBytes(4));
+          if (r.remaining < hh.size) break; // partial; ignore for toy client
+          final msg = r.readBytes(hh.size);
+
+          switch (hh.messageType) {
+            case 0x04: // NewSessionTicket
+              print('🎫 Received NewSessionTicket — ignoring.');
+              break;
+            case 0x18: // KeyUpdate
+              print('🔁 Received KeyUpdate — ignoring for toy client.');
+              break;
+            case 0x0D: // CertificateRequest (post-handshake)
+              print(
+                '📜 Received post-handshake CertificateRequest — ignoring.',
+              );
+              break;
+            default:
+              // ignore anything else
+              break;
+          }
+        }
+        continue; // keep reading until we get app data
       }
 
-      // ============================================================
-      // ✅ HANDLE POST-HANDSHAKE CERTIFICATE REQUEST (very rare)
-      // ============================================================
-      if (body.isNotEmpty && body[0] == 0x0D) {
-        print("📜 Received post-handshake CertificateRequest — ignoring.");
-        continue;
+      // Alert
+      if (innerType == 0x15) {
+        // close_notify is (level=1 warning, desc=0)
+        if (content.length >= 2 && content[1] == 0x00) {
+          return Uint8List(0); // treat as EOF
+        }
+        throw StateError('TLS alert received: $content');
       }
 
-      // ============================================================
-      // ✅ OTHERWISE THIS IS APPLICATION DATA
-      // ============================================================
-      return body;
+      // Unknown inner type: ignore and continue.
     }
   }
 

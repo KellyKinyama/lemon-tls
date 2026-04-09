@@ -30,13 +30,19 @@ Accept: */*
   //   ),
   // );
 
-  final resp = await session.recv();
-  print(utf8.decode(resp));
+  // Read until we get some application data (or EOF/timeout depending on implementation).
+  final out = BytesBuilder(copy: false);
+  while (true) {
+    final chunk = await session.recv();
+    if (chunk.isEmpty) break;
+    out.add(chunk);
 
-  /// Receive response
-  final response = await session.recv();
+    // stop early once we have headers
+    final s = utf8.decode(out.toBytes(), allowMalformed: true);
+    if (s.contains('\r\n\r\n')) break;
+  }
 
-  print(utf8.decode(response));
+  print(utf8.decode(out.toBytes(), allowMalformed: true));
 
   await session.close();
 }
