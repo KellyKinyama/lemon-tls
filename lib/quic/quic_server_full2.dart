@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 // QUIC cryptography
 import 'package:hex/hex.dart';
+import 'package:lemon_tls/quic/packet/payload_parser.dart';
 import 'package:lemon_tls/quic/packet/protocol.dart';
 
 import 'cert_utils.dart';
@@ -45,7 +46,8 @@ class QUICSession {
     print(
       'Session ${HEX.encode(dcid)} received ${plaintext.length} bytes of plaintext.',
     );
-    
+
+    parsePayload(plaintext);
   }
 }
 
@@ -236,7 +238,7 @@ class QuicServerB {
     final isLongHeader = (firstByte & 0x80) != 0;
 
     // Uint8List dcid;
-    String dcidHex;
+    String dcidHex = HEX.encode(dcid);
 
     // The complexity of QUIC headers requires careful parsing, especially for Long Headers.
     if (isLongHeader) {
@@ -262,6 +264,11 @@ class QuicServerB {
       var quicSession = _quicSessions[dcidHex];
 
       if (quicSession == null) {
+        quicSession = _quicSessions[dcidHex] = QUICSession(
+          dcid: dcid,
+          address: address.address,
+          port: port,
+        );
         // Handle new connection (Initial packet)
         if ((firstByte & 0xC0) == 0xC0) {
           final version = ByteData.view(
@@ -311,10 +318,11 @@ class QuicServerB {
               // _quicSessions[dcidHex] = quicSession;
 
               // // Pass the plaintext frames to the session handler
-              // quicSession.handleDecryptedPacket(decryptedPacket.plaintext!);
+              quicSession!.handleDecryptedPacket(decryptedPacket.plaintext!);
             }
           } catch (e) {
             print('Error processing Initial packet: $e');
+            rethrow;
           }
         }
       } else {
