@@ -1,0 +1,280 @@
+// lib/cipher_suite.dart
+import 'dart:typed_data';
+import 'package:pointycastle/export.dart' as pc;
+
+// import '../fast_crypt/src/algorithms/chacha20_poly1305.dart' as fc;
+import '/fast_crypt/src/core/fast_crypt.dart' as fc;
+import 'aes_gcm.dart' as aesGcm;
+import 'chacha.dart' as chacha;
+// import 'package:pointycastle/api.dart';
+// import 'package:pointycastlease_aead_cipher.dart'
+
+const aeadNonceLength = 12;
+
+class CipherSuite {
+  final int id;
+  final pc.Digest Function() hash;
+  final int keyLen;
+  final int hpLen; // Added Header Protection key length
+  final XorNonceAEAD Function({
+    required Uint8List key,
+    required Uint8List nonceMask,
+  })
+  aead;
+
+  CipherSuite({
+    required this.id,
+    required this.hash,
+    required this.keyLen,
+    required this.hpLen, // Added
+    required this.aead,
+  });
+
+  int get ivLen => aeadNonceLength;
+
+  @override
+  String toString() {
+    switch (id) {
+      case 0x1301:
+        return "CipherSuite{ TLS_AES_128_GCM_SHA256}";
+      case 0x1302:
+        return "CipherSuite{ TLS_AES_256_GCM_SHA384}";
+      case 0x1303:
+        return "CipherSuite{ TLS_CHACHA20_POLY1305_SHA256}";
+      default:
+        throw Exception('unknown cipher suite: $id');
+    }
+  }
+}
+
+CipherSuite getCipherSuite(int id) {
+  switch (id) {
+    case 0x1301: // TLS_AES_128_GCM_SHA256
+      return CipherSuite(
+        id: 0x1301,
+        hash: () => pc.SHA256Digest(),
+        keyLen: 16,
+        hpLen: 16, // AES-128 uses a 16-byte HP key
+        aead: aeadAESGCMTLS13,
+      );
+    case 0x1303: // TLS_CHACHA20_POLY1305_SHA256
+      return CipherSuite(
+        id: 0x1303,
+        hash: () => pc.SHA256Digest(),
+        keyLen: 32,
+        hpLen: 32, // ChaCha20 uses a 32-byte HP key
+        aead: aeadChaCha20Poly1305,
+      );
+    default:
+      throw Exception('unknown cipher suite: $id');
+  }
+}
+// XorNonceAEAD aeadAESGCMTLS13({
+//   required Uint8List key,
+//   required Uint8List nonceMask,
+// }) {
+//   final aes = AESEngine();
+//   aes.init(true, KeyParameter(key));
+//   final aead = GCMBlockCipher(aes);
+//   // aead.macSize;
+//   return XorNonceAEAD(aead, key, nonceMask);
+// }
+
+// XorNonceAEAD aeadChaCha20Poly1305({
+//   required Uint8List key,
+//   required Uint8List nonceMask,
+// }) {
+//   final aead = ChaCha20Poly1305(ChaCha7539Engine(), Poly1305());
+//   return XorNonceAEAD(aead, key, nonceMask);
+// }
+
+XorNonceAEAD aeadAESGCMTLS13({
+  required Uint8List key,
+  required Uint8List nonceMask,
+}) {
+  final aes = pc.AESEngine();
+  final aead = pc.GCMBlockCipher(aes);
+  aead.init(
+    true,
+    pc.AEADParameters(pc.KeyParameter(key), 128, Uint8List(12), Uint8List(0)),
+  );
+  return XorNonceAEAD(aead, key, nonceMask); // Pass the key here
+}
+
+XorNonceAEAD aeadChaCha20Poly1305({
+  required Uint8List key,
+  required Uint8List nonceMask,
+}) {
+  final aead = fc.FastCrypt();
+  return XorNonceAEAD(aead, key, nonceMask); // Pass the key here
+}
+
+/// Wraps an AEAD by XORing a fixed pattern into the nonce.
+class XorNonceAEAD {
+  final Uint8List _nonceMask;
+  final dynamic _aead;
+  final Uint8List key; // Add a key field
+
+  XorNonceAEAD(this._aead, this.key, Uint8List nonceMask)
+    : _nonceMask = Uint8List.fromList(nonceMask);
+
+  int get nonceSize => 8; // 64-bit sequence number
+  int get overhead {
+    if (_aead is pc.GCMBlockCipher) {
+      return (_aead).macSize; // ~/
+      // 8; // GCMBlockCipher has macSize getter (in bits)
+    } else if (_aead is fc.FastCrypt) {
+      return 16; // Poly1305 has a fixed MAC size of 16 bytes
+    }
+    throw Exception('Unknown AEAD type');
+  }
+
+  // Uint8List seal(
+  //   Uint8List nonce,
+  //   Uint8List plaintext,
+  //   Uint8List additionalData,
+  // ) {
+  //   final iv = _prepareNonce(nonce);
+  //   _aead.init(
+  //     true,
+  //     AEADParameters(
+  //       KeyParameter(Uint8List(0)),
+  //       overhead * 8,
+  //       iv,
+  //       additionalData,
+  //     ),
+  //   );
+  //   final output = Uint8List(_aead.getOutputSize(plaintext.length));
+  //   final len = _aead.processBytes(plaintext, 0, plaintext.length, output, 0);
+  //   _aead.doFinal(output, len);
+  //   return output;
+  // }
+
+  // Uint8List open(
+  //   Uint8List nonce,
+  //   Uint8List ciphertext,
+  //   Uint8List additionalData,
+  // ) {
+  //   final iv = _prepareNonce(nonce);
+  //   _aead.init(
+  //     false,
+  //     AEADParameters(
+  //       KeyParameter(Uint8List(0)),
+  //       overhead * 8,
+  //       iv,
+  //       additionalData,
+  //     ),
+  //   );
+  //   final output = Uint8List(_aead.getOutputSize(ciphertext.length));
+  //   try {
+  //     final len = _aead.processBytes(
+  //       ciphertext,
+  //       0,
+  //       ciphertext.length,
+  //       output,
+  //       0,
+  //     );
+  //     _aead.doFinal(output, len);
+  //     return output;
+  //   } catch (e) {
+  //     throw Exception('Failed to open AEAD');
+  //   }
+  // }
+
+  Uint8List seal(
+    Uint8List nonce,
+    Uint8List plaintext,
+    Uint8List additionalData,
+  ) {
+    final iv = _prepareNonce(nonce);
+
+    // print("Overheade: ${overhead * 8}");
+    // print("encryption Key: $key");
+    // _aead.init(
+    //   true,
+
+    //   // Use the correct key and macSize
+    //   AEADParameters(
+    //     KeyParameter(key),
+    //     overhead * 8, // macSize is in bits
+    //     iv,
+    //     additionalData,
+    //   ),
+    //   // AEADParameters(KeyParameter(_key), _aead.macSize, iv, additionalData),
+    // );
+    if (_aead is pc.GCMBlockCipher) {
+      return aesGcm.encrypt(
+        encryptionKey: key,
+        message: plaintext,
+        nonce: iv,
+        aead: additionalData,
+      );
+    } else if (_aead is fc.FastCrypt) {
+      return chacha.encrypt(key, plaintext, iv, additionalData);
+    }
+    // final output = Uint8List(_aead.getOutputSize(plaintext.length));
+    // final len = _aead.processBytes(plaintext, 0, plaintext.length, output, 0);
+    // _aead.doFinal(output, len);
+    // return output;
+    throw UnimplementedError("encryption type error: ${_aead.runtimeType}");
+  }
+
+  Uint8List open(
+    Uint8List nonce,
+    Uint8List ciphertext,
+    Uint8List additionalData,
+  ) {
+    final iv = _prepareNonce(nonce);
+
+    // print("decryption Key: $key");
+    // _aead.init(
+    //   false,
+    //   // Use the correct key and macSize
+    //   AEADParameters(
+    //     KeyParameter(key),
+    //     overhead * 8, // macSize is in bits
+    //     iv,
+    //     additionalData,
+    //   ),
+    // );
+    if (_aead is pc.GCMBlockCipher) {
+      return aesGcm.decrypt(
+        encryptionKey: key,
+        ciphertextWithAuthTag: ciphertext,
+        nonce: iv,
+        aead: additionalData,
+      );
+    } else if (_aead is fc.FastCrypt) {
+      return chacha.decrypt(key, ciphertext, iv, additionalData);
+    }
+    // final output = Uint8List(_aead.getOutputSize(plaintext.length));
+    // final len = _aead.processBytes(plaintext, 0, plaintext.length, output, 0);
+    // _aead.doFinal(output, len);
+    // return output;
+    throw UnimplementedError("encryption type error: ${_aead.runtimeType}");
+
+    // return decrypt(key, ciphertext, iv, additionalData);
+    // final output = Uint8List(_aead.getOutputSize(ciphertext.length));
+    // try {
+    //   final len = _aead.processBytes(
+    //     ciphertext,
+    //     0,
+    //     ciphertext.length,
+    //     output,
+    //     0,
+    //   );
+    //   _aead.doFinal(output, len);
+    //   return output;
+    // } catch (e) {
+    //   throw Exception('Failed to open AEAD');
+    // }
+  }
+
+  Uint8List _prepareNonce(Uint8List nonce) {
+    final iv = Uint8List.fromList(_nonceMask);
+    for (var i = 0; i < nonce.length; i++) {
+      iv[4 + i] ^= nonce[i];
+    }
+    return iv;
+  }
+}

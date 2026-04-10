@@ -98,7 +98,7 @@ class Aead {
     }
 
     final out = switch (suite) {
-      CipherSuite.aes128gcm => aes.encrypt(key, plaintext, nonce, aad),
+      CipherSuite.aes128gcm => aes.encrypt(encryptionKey:  key,message:  plaintext,nonce:  nonce,aead:  aad),
       CipherSuite.chacha20poly1305 => chacha.encrypt(
         key,
         plaintext,
@@ -129,7 +129,7 @@ class Aead {
     }
 
     final out = switch (suite) {
-      CipherSuite.aes128gcm => aes.decrypt(key, ciphertext, nonce, aad),
+      CipherSuite.aes128gcm => aes.decrypt(encryptionKey:  key,ciphertextWithAuthTag:  ciphertext,nonce:  nonce,aead:  aad),
       CipherSuite.chacha20poly1305 => chacha.decrypt(
         key,
         ciphertext,

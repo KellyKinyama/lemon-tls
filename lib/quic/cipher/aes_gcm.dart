@@ -5,12 +5,12 @@ import 'package:pointycastle/block/aes.dart';
 import 'package:pointycastle/api.dart';
 import 'package:pointycastle/block/modes/gcm.dart';
 
-Uint8List decrypt(
-  Uint8List encryptionKey,
-  Uint8List ciphertextWithAuthTag,
-  Uint8List nonce,
-  Uint8List aead,
-) {
+Uint8List decrypt({
+  required Uint8List encryptionKey,
+  required Uint8List ciphertextWithAuthTag,
+  required Uint8List nonce,
+  required Uint8List aead,
+}) {
   // final msg = utf8.encode(
   //   'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
   // );
@@ -43,12 +43,12 @@ Uint8List decrypt(
   // }
 }
 
-Uint8List encrypt(
-  Uint8List encryptionKey,
-  Uint8List message,
-  Uint8List nonce,
-  Uint8List aead,
-) {
+Uint8List encrypt({
+  required Uint8List encryptionKey,
+  required Uint8List message,
+  required Uint8List nonce,
+  required Uint8List aead,
+}) {
   // print("encrypt: nonce: $nonce");
   // final msg = utf8.encode(
   //   'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',

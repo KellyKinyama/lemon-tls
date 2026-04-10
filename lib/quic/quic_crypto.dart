@@ -14,11 +14,13 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:hex/hex.dart';
 import 'package:lemon_tls/tls13/crypto.dart';
 import 'package:pointycastle/export.dart';
 import 'package:x25519/x25519.dart';
 
 import 'hkdf.dart';
+import 'packet/protocol.dart';
 
 //
 // ============================================================
@@ -211,96 +213,148 @@ int expandPn(int truncated, int pnLen, int largestSeen) {
 // ============================================================
 // Initial Keys – Multi Version (RFC 9001)
 // ============================================================
-final Map<int, Uint8List> quicInitialSalts = {
-  0x00000001: Uint8List.fromList([
-    0x38,
-    0x76,
-    0x2c,
-    0xf7,
-    0xf5,
-    0x59,
-    0x34,
-    0xb3,
-    0x4d,
-    0x17,
-    0x9a,
-    0xe6,
-    0xa4,
-    0xc8,
-    0x0c,
-    0xad,
-    0xcc,
-    0xbb,
-    0x7f,
-    0x0a,
-  ]),
-  0xff00001d: Uint8List.fromList([
-    0xaf,
-    0xbf,
-    0xec,
-    0x28,
-    0x99,
-    0x93,
-    0xd2,
-    0x4c,
-    0x9e,
-    0x97,
-    0x86,
-    0xf1,
-    0x9c,
-    0x61,
-    0x11,
-    0xe0,
-    0x43,
-    0x90,
-    0xa8,
-    0x99,
-  ]),
-  0xff000020: Uint8List.fromList([
-    0x7f,
-    0xbc,
-    0xdb,
-    0x0e,
-    0x7c,
-    0x66,
-    0xbb,
-    0x77,
-    0x7b,
-    0xe3,
-    0x0e,
-    0xbd,
-    0x5f,
-    0xa5,
-    0x15,
-    0x87,
-    0x3d,
-    0x8d,
-    0x6e,
-    0x67,
-  ]),
-  0x51303530: Uint8List.fromList([
-    0x69,
-    0x45,
-    0x6f,
-    0xbe,
-    0xf1,
-    0x6e,
-    0xd7,
-    0xdc,
-    0x48,
-    0x15,
-    0x9d,
-    0x98,
-    0xd0,
-    0x7f,
-    0x5c,
-    0x3c,
-    0x3d,
-    0x5a,
-    0xa7,
-    0x0a,
-  ]),
-};
+final quicSaltV1 = Uint8List.fromList([
+  0x38,
+  0x76,
+  0x2c,
+  0xf7,
+  0xf5,
+  0x59,
+  0x34,
+  0xb3,
+  0x4d,
+  0x17,
+  0x9a,
+  0xe6,
+  0xa4,
+  0xc8,
+  0x0c,
+  0xad,
+  0xcc,
+  0xbb,
+  0x7f,
+  0x0a,
+]);
+final quicSaltV2 = Uint8List.fromList([
+  0x0d,
+  0xed,
+  0xe3,
+  0xde,
+  0xf7,
+  0x00,
+  0xa6,
+  0xdb,
+  0x81,
+  0x93,
+  0x81,
+  0xbe,
+  0x6e,
+  0x26,
+  0x9d,
+  0xcb,
+  0xf9,
+  0xbd,
+  0x2e,
+  0xd9,
+]);
+
+// final Map<int, Uint8List> quicInitialSalts = {
+//   0x00000001: Uint8List.fromList([
+//     0x38,
+//     0x76,
+//     0x2c,
+//     0xf7,
+//     0xf5,
+//     0x59,
+//     0x34,
+//     0xb3,
+//     0x4d,
+//     0x17,
+//     0x9a,
+//     0xe6,
+//     0xa4,
+//     0xc8,
+//     0x0c,
+//     0xad,
+//     0xcc,
+//     0xbb,
+//     0x7f,
+//     0x0a,
+//   ]),
+//   0xff00001d: Uint8List.fromList([
+//     0xaf,
+//     0xbf,
+//     0xec,
+//     0x28,
+//     0x99,
+//     0x93,
+//     0xd2,
+//     0x4c,
+//     0x9e,
+//     0x97,
+//     0x86,
+//     0xf1,
+//     0x9c,
+//     0x61,
+//     0x11,
+//     0xe0,
+//     0x43,
+//     0x90,
+//     0xa8,
+//     0x99,
+//   ]),
+//   0xff000020: Uint8List.fromList([
+//     0x7f,
+//     0xbc,
+//     0xdb,
+//     0x0e,
+//     0x7c,
+//     0x66,
+//     0xbb,
+//     0x77,
+//     0x7b,
+//     0xe3,
+//     0x0e,
+//     0xbd,
+//     0x5f,
+//     0xa5,
+//     0x15,
+//     0x87,
+//     0x3d,
+//     0x8d,
+//     0x6e,
+//     0x67,
+//   ]),
+//   0x51303530: Uint8List.fromList([
+//     0x69,
+//     0x45,
+//     0x6f,
+//     0xbe,
+//     0xf1,
+//     0x6e,
+//     0xd7,
+//     0xdc,
+//     0x48,
+//     0x15,
+//     0x9d,
+//     0x98,
+//     0xd0,
+//     0x7f,
+//     0x5c,
+//     0x3c,
+//     0x3d,
+//     0x5a,
+//     0xa7,
+//     0x0a,
+//   ]),
+// };
+
+const hkdfLabelKeyV1 = 'quic key';
+const hkdfLabelKeyV2 = 'quicv2 key';
+const hkdfLabelIVV1 = 'quic iv';
+const hkdfLabelIVV2 = 'quicv2 iv';
+
+Uint8List getSalt(Version v) => v == Version.version2 ? quicSaltV2 : quicSaltV1;
 
 class QuicInitialKeys {
   final Uint8List key;
@@ -308,6 +362,37 @@ class QuicInitialKeys {
   final Uint8List hp;
 
   QuicInitialKeys(this.key, this.iv, this.hp);
+
+  @override
+  String toString() {
+    // TODO: implement toString
+    return """QuicInitialKeys(
+
+  client initial key: b14b918124fda5c8d79847602fa3520b
+  client initial IV: ddbc15dea80925a55686a7df
+  server initial key: d77fc4056fcfa32bd1302469ee6ebf90
+  server initial IV: fcb748e37ff79860faa07477
+
+
+  client initial header protection key: 6df4e9d737cdf714711d7c617ee82981
+server initial header protection key: 440b2725e91dc79b370711ef792faa3d
+)""";
+
+    return """QuicInitialKeys(
+  // Uint8List key: ${HEX.encode(key)},
+  // Uint8List iv : ${HEX.encode(iv)} ,
+  // Uint8List hp : ${HEX.encode(hp)} ,
+
+  client initial key: b14b918124fda5c8d79847602fa3520b
+  client initial IV: ddbc15dea80925a55686a7df
+  server initial key: d77fc4056fcfa32bd1302469ee6ebf90
+  server initial IV: fcb748e37ff79860faa07477
+
+
+  client initial header protection key: 6df4e9d737cdf714711d7c617ee82981
+server initial header protection key: 440b2725e91dc79b370711ef792faa3d
+)""";
+  }
 }
 
 QuicInitialKeys quicDeriveInitialSecrets({
@@ -315,14 +400,15 @@ QuicInitialKeys quicDeriveInitialSecrets({
   required int version,
   required bool forRead,
 }) {
-  final salt = quicInitialSalts[version];
+  final salt = getSalt(Version.fromValue(version));
   if (salt == null) {
     throw "Unsupported QUIC version: 0x${version.toRadixString(16)}";
   }
 
   final label = forRead ? "client in" : "server in";
 
-  final initSecret = hkdfExtractSha256(ikm: dcid, salt: salt);
+  // final initSecret = hkdfExtractSha256(ikm: dcid, salt: salt);
+  final initSecret = hkdfExtract(dcid, salt: salt);
 
   final secret2 = quicHkdfExpandLabel(
     secret: initSecret,
