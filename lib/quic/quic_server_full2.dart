@@ -19,7 +19,7 @@ import 'aead.dart';
 import 'byte_reader.dart';
 
 // TLS Handshake Messages
-import 'handshake/client_hello.dart';
+// import 'handshake/client_hello.dart';
 import 'handshake/server_hello.dart';
 import 'handshake/encrypted_extensions.dart';
 import 'handshake/finished.dart';
@@ -29,27 +29,10 @@ import 'initialial_aead.dart';
 import 'packet/quic_packet.dart';
 import 'quic_crypto.dart';
 import 'quic_ack.dart';
+import 'quic_keys.dart';
+import 'quic_session.dart';
 import 'tls_crypto.dart'; // ✅ NEW
 // (initial secrets now handled by quic_crypto.dart)
-
-class QUICSession {
-  final Uint8List dcid;
-  final String address;
-  final int port;
-  // State for keys, stream limits, largest PN, etc., would be managed here.
-
-  QUICSession({required this.dcid, required this.address, required this.port});
-
-  // Mock method to simulate processing decrypted frames
-  void handleDecryptedPacket(Uint8List plaintext) {
-    // In a full implementation, this calls the frame parser and stream handlers.
-    print(
-      'Session ${HEX.encode(dcid)} received ${plaintext.length} bytes of plaintext.',
-    );
-
-    parsePayload(plaintext);
-  }
-}
 
 // ================================================================
 // Utilities
@@ -284,25 +267,49 @@ class QuicServerB {
             );
             // expect(clientSecret, equals(tt['expectedClientSecret']));
 
-            final (key, iv, hp) = computeInitialKeyAndIV(
+            // --- INITIAL READ KEYS (client → server)
+            final (readKey, readIv, readHp) = computeInitialKeyAndIV(
               clientSecret,
               Version.fromValue(version),
             );
-            // FIX: Destructure the record returned by quicDeriveInitSecrets
-            // final (_, initKeys) = quicDeriveInitSecrets(dcid, version, 'read');
-            print("""class QUICKeys {
-  key: ${HEX.encode(key)}; // Packet Protection Key
-  iv: ${HEX.encode(iv)};
-   hp: ${HEX.encode(hp)}; // Header Protection Key""");
+
+            quicSession!.initialRead = InitialKeys(
+              key: readKey,
+              iv: readIv,
+              hp: readHp,
+            );
+
+            final (writeKey, writeIv, writeHp) = computeInitialKeyAndIV(
+              serverSecret,
+              Version.fromValue(version),
+            );
+
+            quicSession.initialWrite = InitialKeys(
+              key: writeKey,
+              iv: writeIv,
+              hp: writeHp,
+            );
 
             // Decrypt the Initial packet
+
+            print("""
+✅ Stored Initial Keys for session ${HEX.encode(dcid)}:
+  READ.key = ${HEX.encode(readKey)}
+  READ.iv  = ${HEX.encode(readIv)}
+  READ.hp  = ${HEX.encode(readHp)}
+  WRITE.key = ${HEX.encode(writeKey)}
+  WRITE.iv  = ${HEX.encode(writeIv)}
+  WRITE.hp  = ${HEX.encode(writeHp)}
+""");
+
+            // ✅ Now decrypt using stored keys:
             final decryptedPacket = decryptQuicPacket(
               mutablePacket,
-              key,
-              iv,
-              hp,
+              quicSession.initialRead!.key,
+              quicSession.initialRead!.iv,
+              quicSession.initialRead!.hp,
               dcid,
-              0, // largestPn for Initial is 0
+              0,
             );
 
             if (decryptedPacket != null && decryptedPacket.plaintext != null) {
