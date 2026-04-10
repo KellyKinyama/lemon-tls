@@ -439,22 +439,22 @@ QuicInitialKeys quicDeriveInitialSecrets({
   );
 }
 
-class QuicKeyPair {
-  final Uint8List privateKey;
+// class QuicKeyPair {
+//   final Uint8List privateKey;
 
-  QuicKeyPair._(this.privateKey);
+//   QuicKeyPair._(this.privateKey);
 
-  Uint8List get publicKey => Uint8List.fromList(X25519(privateKey, basePoint));
+//   Uint8List get publicKey => Uint8List.fromList(X25519(privateKey, basePoint));
 
-  Uint8List exchange(Uint8List peerPublic) =>
-      Uint8List.fromList(X25519(privateKey, peerPublic));
+//   Uint8List exchange(Uint8List peerPublic) =>
+//       Uint8List.fromList(X25519(privateKey, peerPublic));
 
-  static QuicKeyPair generate() {
-    final r = math.Random.secure();
-    final priv = Uint8List(32);
-    for (int i = 0; i < 32; i++) {
-      priv[i] = r.nextInt(256);
-    }
-    return QuicKeyPair._(priv);
-  }
-}
+//   static QuicKeyPair generate() {
+//     final r = math.Random.secure();
+//     final priv = Uint8List(32);
+//     for (int i = 0; i < 32; i++) {
+//       priv[i] = r.nextInt(256);
+//     }
+//     return QuicKeyPair._(priv);
+//   }
+// }

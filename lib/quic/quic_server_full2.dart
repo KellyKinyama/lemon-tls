@@ -9,6 +9,7 @@ import 'package:lemon_tls/quic/packet/protocol.dart';
 
 import 'cert_utils.dart';
 // import 'crypto.dart';
+import 'crypto.dart';
 import 'handshake/certificate_verify.dart';
 // import 'crypto.dart';
 import 'hkdf.dart';
@@ -31,7 +32,7 @@ import 'quic_crypto.dart';
 import 'quic_ack.dart';
 import 'quic_keys.dart';
 import 'quic_session.dart';
-import 'tls_crypto.dart'; // ✅ NEW
+// import 'tls_crypto.dart'; // ✅ NEW
 // (initial secrets now handled by quic_crypto.dart)
 
 // ================================================================
@@ -252,7 +253,13 @@ class QuicServerB {
           address: address.address,
           port: port,
         );
-        // Handle new connection (Initial packet)
+
+        quicSession.x25519 = QuicKeyPair.generate();
+
+        // final p256 = PrivateKey.generate(getP256());
+        // quicSession.p256Priv = p256.bytes;
+        // quicSession.p256Pub = Uint8List.fromList(p256.publicKey.toBytes());
+        // // Handle new connection (Initial packet)
         if ((firstByte & 0xC0) == 0xC0) {
           final version = ByteData.view(
             msg.buffer,
@@ -326,6 +333,90 @@ class QuicServerB {
 
               // // Pass the plaintext frames to the session handler
               quicSession!.handleDecryptedPacket(decryptedPacket.plaintext!);
+
+              // ✅ The plaintext contained a ClientHello. The parser stored it in session.clientHello.
+              if (quicSession.clientHello == null) {
+                print("❌ No ClientHello parsed — cannot send ServerHello.");
+                return;
+              }
+
+              final ch = quicSession.clientHello!;
+              print("✅ Using stored ClientHello to build ServerHello");
+
+              // ✅ Extract client's KeyShare (X25519)
+              final clientKsExt = ch.extensions.firstWhere(
+                (e) => e.type == 51,
+                orElse: () => throw "❌ Client did not send key_share",
+              );
+              final clientKsBuf = ByteReader(clientKsExt.data);
+              final clientGroup = clientKsBuf.readUint16be();
+              final clientKeyLen = clientKsBuf.readUint16be();
+              final clientPub = clientKsBuf.readBytes(clientKeyLen);
+
+              print(
+                "✅ Client KeyShare group: 0x${clientGroup.toRadixString(16)}",
+              );
+              print("✅ Client X25519 pubkey: ${HEX.encode(clientPub)}");
+
+              // ✅ Only X25519 allowed
+              if (clientGroup != 0x001D) {
+                print("❌ Unsupported key share group");
+                return;
+              }
+
+              // ✅ Generate server X25519 keypair
+              final serverKP = QuicKeyPair.generate();
+              final serverPub = serverKP.publicKey;
+
+              // ✅ Compute shared secret
+              final sharedSecret = serverKP.exchange(clientPub);
+              print(
+                "✅ Derived ECDH shared secret: ${HEX.encode(sharedSecret)}",
+              );
+
+              // ✅ Build TLS ServerHello handshake bytes
+              final shBytes = buildServerHelloBytes(
+                serverRandom: Uint8List(
+                  32,
+                ), // you may replace with secure random
+                serverKeyShare: serverPub,
+                cipherSuite: 0x1301, // TLS_AES_128_GCM_SHA256
+                group: 0x001D, // X25519
+              );
+
+              // ✅ Store ServerHello in transcript
+              quicSession.transcript.add(shBytes);
+              print("✅ Added ServerHello to transcript");
+
+              // ✅ Wrap TLS message in a QUIC CRYPTO frame
+              final shCryptoFrame = buildCryptoFrame(shBytes);
+
+              // ✅ Encrypt server flight #1 with Initial Write keys
+              final ciphertext = quicAeadEncrypt(
+                key: quicSession.initialWrite!.key,
+                iv: quicSession.initialWrite!.iv,
+                packetNumber: 1,
+                plaintext: shCryptoFrame,
+                aad: Uint8List(0),
+              );
+
+              if (ciphertext == null) {
+                print("❌ Failed to AEAD-encrypt ServerHello");
+                return;
+              }
+
+              // ✅ Build the QUIC Initial packet
+              final initialResponse = buildInitialPacket(
+                dcid: scid, // client SCID becomes server DCID
+                scid: dcid, // server SCID is our original DCID
+                packetNumber: 1,
+                payload: ciphertext,
+              );
+
+              // ✅ SEND ServerHello
+              socket.send(initialResponse, address, port);
+
+              print("✅✅ Sent ServerHello in QUIC Initial Packet");
             }
           } catch (e) {
             print('Error processing Initial packet: $e');

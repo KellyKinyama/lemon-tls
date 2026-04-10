@@ -1,9 +1,19 @@
-// lib/quic_server.dart
+// quic_server_option_b.dart
 import 'dart:io';
 import 'dart:typed_data';
 
-// QUIC crypto primitives
+// QUIC cryptography
+import 'package:hex/hex.dart';
+import 'package:lemon_tls/quic/packet/payload_parser.dart';
+import 'package:lemon_tls/quic/packet/protocol.dart';
+
+import 'cert_utils.dart';
+// import 'crypto.dart';
+import 'cipher/p256.dart';
 import 'crypto.dart';
+import 'handshake/certificate_verify.dart';
+// import 'crypto.dart';
+import 'handshake/keyshare.dart';
 import 'hkdf.dart';
 import 'hash.dart';
 import 'aead.dart';
@@ -11,50 +21,45 @@ import 'aead.dart';
 // Helpers
 import 'byte_reader.dart';
 
-// TLS-only handshake structures
-import 'handshake/client_hello.dart';
+// TLS Handshake Messages
+// import 'handshake/client_hello.dart';
 import 'handshake/server_hello.dart';
 import 'handshake/encrypted_extensions.dart';
 import 'handshake/finished.dart';
-import 'quic_aead.dart';
+import 'handshake/certificate.dart';
 
-// (Option B will add)
-// import 'handshake/certificate.dart';
-// import 'handshake/certificate_verify.dart';
-// import 'cert/ecdsa_cert.dart';
+import 'initialial_aead.dart';
+import 'packet/quic_packet.dart';
+import 'quic_crypto.dart';
+import 'quic_ack.dart';
+import 'quic_keys.dart';
+import 'quic_session.dart';
+// import 'tls_crypto.dart'; // ✅ NEW
+// (initial secrets now handled by quic_crypto.dart)
 
-//
-// ===================================================================
-// Utility: concat byte arrays
-// ===================================================================
+// ================================================================
+// Utilities
+// ================================================================
 Uint8List _concat(List<Uint8List> xs) {
-  final total = xs.fold(0, (a, b) => a + b.length);
+  final total = xs.fold(0, (n, p) => n + p.length);
   final out = Uint8List(total);
-  int o = 0;
-  for (final b in xs) {
-    out.setRange(o, o + b.length, b);
-    o += b.length;
+  var o = 0;
+  for (final p in xs) {
+    out.setRange(o, o + p.length, p);
+    o += p.length;
   }
   return out;
 }
 
-//
-// ===================================================================
-// Build CRYPTO Frame
-// ===================================================================
-Uint8List buildCryptoFrame(Uint8List data) {
-  return Uint8List.fromList([
-    0x06, // CRYPTO
-    0x00, // offset
-    data.length,
-    ...data,
-  ]);
-}
+// ================================================================
+// CRYPTO Frame Builder
+// ================================================================
+Uint8List buildCryptoFrame(Uint8List data) =>
+    Uint8List.fromList([0x06, 0x00, data.length, ...data]);
 
-//
-// ===================================================================
-// Build QUIC Initial Packet (no HP)
-// ===================================================================
+// ================================================================
+// Packet Builders
+// ================================================================
 Uint8List buildInitialPacket({
   required Uint8List dcid,
   required Uint8List scid,
@@ -62,8 +67,8 @@ Uint8List buildInitialPacket({
   required Uint8List payload,
 }) {
   return Uint8List.fromList([
-    0xC3, // Long header, Initial
-    0x00, 0x00, 0x00, 0x01, // version = 1
+    0xC3, // Initial + PN length=1
+    0x00, 0x00, 0x00, 0x01, // QUIC v1
     dcid.length, ...dcid,
     scid.length, ...scid,
     0x00, // token length
@@ -73,10 +78,6 @@ Uint8List buildInitialPacket({
   ]);
 }
 
-//
-// ===================================================================
-// Build QUIC Handshake Packet (no HP)
-// ===================================================================
 Uint8List buildHandshakePacket({
   required Uint8List dcid,
   required Uint8List scid,
@@ -84,7 +85,7 @@ Uint8List buildHandshakePacket({
   required Uint8List payload,
 }) {
   return Uint8List.fromList([
-    0xE3, // Long header, Handshake
+    0xE3, // Handshake + PN len=1
     0x00, 0x00, 0x00, 0x01,
     dcid.length, ...dcid,
     scid.length, ...scid,
@@ -94,10 +95,9 @@ Uint8List buildHandshakePacket({
   ]);
 }
 
-//
-// ===================================================================
-// QUIC Initial Packet Parser
-// ===================================================================
+// ================================================================
+// Initial Packet Parser
+// ================================================================
 class QuicInitialPacket {
   final Uint8List dcid;
   final Uint8List scid;
@@ -113,9 +113,8 @@ class QuicInitialPacket {
 
   static QuicInitialPacket parse(Uint8List pkt) {
     int i = 0;
-
     final flags = pkt[i++];
-    if ((flags & 0xC0) != 0xC0) throw StateError("Not an Initial packet");
+    if ((flags & 0xC0) != 0xC0) throw StateError("Not Initial");
 
     i += 4; // version
 
@@ -130,33 +129,53 @@ class QuicInitialPacket {
     final tokenLen = pkt[i++];
     i += tokenLen;
 
-    final _length = pkt[i++]; // simplified varint
+    final _lenIgnored = pkt[i++];
     final pn = pkt[i++];
-    final rest = pkt.sublist(i);
+
+    final ciphertext = pkt.sublist(i);
 
     return QuicInitialPacket(
       dcid: dcid,
       scid: scid,
-      payload: rest,
+      payload: ciphertext,
       packetNumber: pn,
     );
   }
+
+  @override
+  String toString() {
+    // TODO: implement toString
+    return """QuicInitialPacket{
+     dcid: ${HEX.encode(dcid)},
+      scid: ${HEX.encode(scid)},
+      payload: ${HEX.encode(payload.sublist(0, 10))}... ,
+      packetNumber: $packetNumber,
+    }""";
+  }
 }
 
-//
-// ===================================================================
-// QUIC Server Core
-// ===================================================================
-class QuicServer {
+// ================================================================
+// FULL OPTION-B QUIC SERVER (Now with ACK)
+// ================================================================
+class QuicServerB {
   final RawDatagramSocket socket;
 
-  QuicServer(this.socket);
+  final Map<String, QUICSession> _quicSessions = {};
 
+  late final EcdsaCert cert;
   final transcript = <Uint8List>[];
 
-  void start() {
-    print("✅ QUIC server listening on UDP ${socket.port}");
+  // ✅ ACK tracking
+  int largestReceived = -1;
+  final Set<int> receivedPns = {};
 
+  QuicServerB(this.socket) {
+    cert = generateSelfSignedCertificate();
+    print("✅ Generated self-signed ECDSA-P256 certificate");
+  }
+
+  void start() {
+    print("✅ QUIC Option-B server listening on UDP ${socket.port}");
     socket.listen((ev) {
       if (ev == RawSocketEvent.read) {
         final dg = socket.receive();
@@ -165,157 +184,561 @@ class QuicServer {
     });
   }
 
-  Future<void> _onPacket(Datagram dg) async {
-    try {
-      final pkt = QuicInitialPacket.parse(dg.data);
-
-      // ------------------------------
-      // Initial Keys
-      // ------------------------------
-      final initial = QuicInitialKeys(pkt.dcid);
-      final aead = Aead(CipherSuite.aes128gcm);
-
-      // ------------------------------
-      // Decrypt CRYPTO(ClientHello)
-      // ------------------------------
-      final nonce = quicNonce(initial.clientIv, pkt.packetNumber);
-      final plaintext = aead.decrypt(
-        key: initial.clientKey,
-        nonce: nonce,
-        aad: Uint8List(0),
-        ciphertext: pkt.payload,
-      );
-
-      final br = ByteReader(plaintext);
-      if (br.readUint8() != 0x06) return;
-
-      br.readUint8(); // offset=0
-      final len = br.readUint8();
-      final chMsg = br.readBytes(len);
-
-      transcript.add(chMsg);
-
-      final ch = ClientHello.deserialize(ByteReader(chMsg));
-      final clientPub = ch.parsedExtensions
-          .whereType<ClientHelloKeyShare>()
-          .first
-          .keyExchange;
-
-      // ------------------------------
-      // Server KeyShare (X25519)
-      // ------------------------------
-      final serverKP = QuicKeyPair.generate();
-      final shared = serverKP.exchange(clientPub);
-
-      // ------------------------------
-      // ServerHello
-      // ------------------------------
-      final sh = ServerHello.buildForQuic(
-        keySharePublic: serverKP.publicKey,
-        cipherSuite: CipherSuite.aes128gcm,
-      );
-
-      final shBytes = sh.serialize();
-      transcript.add(shBytes);
-
-      final shCrypto = buildCryptoFrame(shBytes);
-      final shNonce = quicNonce(initial.serverIv, 1);
-
-      final shCiphertext = aead.encrypt(
-        key: initial.serverKey,
-        nonce: shNonce,
-        aad: Uint8List(0),
-        plaintext: shCrypto,
-      );
-
-      final initialPacket = buildInitialPacket(
-        dcid: pkt.scid,
-        scid: pkt.dcid,
-        packetNumber: 1,
-        payload: shCiphertext,
-      );
-
-      socket.send(initialPacket, dg.address, dg.port);
-      print("✅ Sent ServerHello");
-
-      // ------------------------------
-      // Derive HS keys
-      // ------------------------------
-      final hHash = createHash(_concat(transcript));
-
-      final hsSecret = hkdfExtract(Uint8List(hHash.length), salt: hHash);
-      final hsServer = quicHkdfExpandLabel(
-        secret: hsSecret,
-        label: "s hs traffic",
-        context: hHash,
-        length: 32,
-      );
-
-      final hsKey = quicHkdfExpandLabel(
-        secret: hsServer,
-        label: "key",
-        context: Uint8List(0),
-        length: 16,
-      );
-
-      final hsIv = quicHkdfExpandLabel(
-        secret: hsServer,
-        label: "iv",
-        context: Uint8List(0),
-        length: 12,
-      );
-
-      // ------------------------------
-      // EncryptedExtensions + Finished
-      // ------------------------------
-      final ee = EncryptedExtensions.build();
-      transcript.add(ee);
-
-      final t2 = createHash(_concat(transcript));
-
-      final fnKey = quicHkdfExpandLabel(
-        secret: hsServer,
-        label: "finished",
-        context: Uint8List(0),
-        length: 32,
-      );
-
-      final fin = FinishedMessage.build(finishedKey: fnKey, transcriptHash: t2);
-      transcript.add(fin);
-
-      final flight = _concat([ee, fin]);
-      final hsCrypto = buildCryptoFrame(flight);
-
-      final hsNonce = quicNonce(hsIv, 1);
-      final hsCiphertext = aead.encrypt(
-        key: hsKey,
-        nonce: hsNonce,
-        aad: Uint8List(0),
-        plaintext: hsCrypto,
-      );
-
-      final hsPacket = buildHandshakePacket(
-        dcid: pkt.scid,
-        scid: pkt.dcid,
-        packetNumber: 1,
-        payload: hsCiphertext,
-      );
-
-      socket.send(hsPacket, dg.address, dg.port);
-      print("✅ Sent Handshake Packet");
-    } catch (e, st) {
-      print("❌ QUIC handshake error: $e");
-      print(st);
+  void _receivingQuicPacket(InternetAddress address, int port, Uint8List msg) {
+    if (msg.isEmpty) {
+      print("empty message");
+      return;
     }
+
+    print('\n--- Parsing the QU-IC Initial Packet with Debugging ---');
+    final mutablePacket = Uint8List.fromList(msg);
+    // final mutablePacket = splitHexString(
+    //   "c1000000010008f067a5502a4262b50040750001",
+    // );
+    final buffer = mutablePacket.buffer;
+    int offset = 1 + 4; // Skip first byte and version
+    // DEBUG: Print initial state
+    print('DEBUG: Starting offset: $offset');
+
+    final dcidLen = mutablePacket[offset];
+    offset += 1;
+    final dcid = Uint8List.view(buffer, offset, dcidLen);
+    offset += dcidLen;
+    // DEBUG: Verify the most critical piece of info: the DCID
+    print('DEBUG: Parsed DCID Length: $dcidLen');
+    print(
+      'DEBUG: Parsed DCID (Hex): ${HEX.encode(dcid)}, expeceted: 0001020304050607',
+    );
+    print('DEBUG: Offset after DCID: $offset');
+
+    final scidLen = mutablePacket[offset];
+    offset += 1;
+    final scid = Uint8List.view(buffer, offset, scidLen);
+    offset += scidLen;
+    // DEBUG: Verify the most critical piece of info: the DCID
+    print('DEBUG: Parsed SCID Length: $scidLen');
+    print('DEBUG: Parsed SCID (Hex): ${HEX.encode(scid)}');
+    print('DEBUG: Offset after SCID: $offset');
+
+    final firstByte = msg[0];
+    final isLongHeader = (firstByte & 0x80) != 0;
+
+    // Uint8List dcid;
+    String dcidHex = HEX.encode(dcid);
+
+    // The complexity of QUIC headers requires careful parsing, especially for Long Headers.
+    if (isLongHeader) {
+      print(
+        'The complexity of QUIC headers requires careful parsing, especially for Long Headers.',
+      );
+      // Assuming a Long Header: Initial (0xC0-0xC3), R(4 bits) + V(4 bytes) + DCIDL(1 byte) + DCID
+      if (msg.length < 7) {
+        print('Packet too short for Long Header parsing');
+        return;
+      }
+
+      // final dcidLen = msg[6];
+      // if (dcidLen > 20 || dcidLen == 0) {
+      //   print("dcidLen > 20: ${dcidLen > 20}, dcidLen == 0: ${dcidLen == 0}");
+      //   return;
+      // }
+      // // Invalid length
+
+      // dcid = msg.sublist(7, 7 + dcidLen);
+      dcidHex = HEX.encode(dcid);
+
+      var quicSession = _quicSessions[dcidHex];
+
+      if (quicSession == null) {
+        quicSession = _quicSessions[dcidHex] = QUICSession(
+          dcid: dcid,
+          address: address.address,
+          port: port,
+        );
+
+        quicSession.x25519 = QuicKeyPair.generate();
+
+        // final p256 = PrivateKey.generate(getP256());
+        // quicSession.p256Priv = p256.bytes;
+        // quicSession.p256Pub = Uint8List.fromList(p256.publicKey.toBytes());
+        // // Handle new connection (Initial packet)
+        if ((firstByte & 0xC0) == 0xC0) {
+          final version = ByteData.view(
+            msg.buffer,
+            msg.offsetInBytes + 1,
+            4,
+          ).getUint32(0);
+
+          try {
+            final (clientSecret, serverSecret) = computeSecrets(
+              dcid,
+              Version.fromValue(version),
+            );
+            // expect(clientSecret, equals(tt['expectedClientSecret']));
+
+            // --- INITIAL READ KEYS (client → server)
+            final (readKey, readIv, readHp) = computeInitialKeyAndIV(
+              clientSecret,
+              Version.fromValue(version),
+            );
+
+            quicSession!.initialRead = InitialKeys(
+              key: readKey,
+              iv: readIv,
+              hp: readHp,
+            );
+
+            final (writeKey, writeIv, writeHp) = computeInitialKeyAndIV(
+              serverSecret,
+              Version.fromValue(version),
+            );
+
+            quicSession.initialWrite = InitialKeys(
+              key: writeKey,
+              iv: writeIv,
+              hp: writeHp,
+            );
+
+            // Decrypt the Initial packet
+
+            print("""
+✅ Stored Initial Keys for session ${HEX.encode(dcid)}:
+  READ.key = ${HEX.encode(readKey)}
+  READ.iv  = ${HEX.encode(readIv)}
+  READ.hp  = ${HEX.encode(readHp)}
+  WRITE.key = ${HEX.encode(writeKey)}
+  WRITE.iv  = ${HEX.encode(writeIv)}
+  WRITE.hp  = ${HEX.encode(writeHp)}
+""");
+
+            // ✅ Now decrypt using stored keys:
+            final decryptedPacket = decryptQuicPacket(
+              mutablePacket,
+              quicSession.initialRead!.key,
+              quicSession.initialRead!.iv,
+              quicSession.initialRead!.hp,
+              dcid,
+              0,
+            );
+
+            if (decryptedPacket != null && decryptedPacket.plaintext != null) {
+              print(
+                'Successfully decrypted Initial packet. Creating new session.',
+              );
+              // Session creation and initial handshake response logic goes here.
+              // quicSession = QUICSession(
+              //   dcid: dcid,
+              //   address: address.address,
+              //   port: port,
+              // );
+              // _quicSessions[dcidHex] = quicSession;
+
+              // // Pass the plaintext frames to the session handler
+              quicSession!.handleDecryptedPacket(decryptedPacket.plaintext!);
+
+              // ✅ The plaintext contained a ClientHello. The parser stored it in session.clientHello.
+              if (quicSession.clientHello == null) {
+                print("❌ No ClientHello parsed — cannot send ServerHello.");
+                return;
+              }
+
+              final ch = quicSession.clientHello!;
+              print("✅ Using stored ClientHello to build ServerHello");
+
+              // ✅ Extract client's KeyShare (X25519)
+
+              final ks = extractClientKeyShare(ch);
+
+              print("✅ Client KeyShare group 0x${ks.group.toRadixString(16)}");
+              print("✅ Public key = ${HEX.encode(ks.pub)}");
+
+              Uint8List sharedSecret;
+
+              if (ks.group == 0x001D) {
+                sharedSecret = quicSession.x25519.exchange(ks.pub); // X25519
+              } else if (ks.group == 0x0017) {
+                sharedSecret = generateP256SharedSecret(
+                  ks.pub,
+                  quicSession.p256Priv,
+                );
+              } else {
+                print(
+                  "❌ Unsupported key share group 0x${ks.group.toRadixString(16)}",
+                );
+                return;
+              }
+
+              print("✅ Derived shared secret: ${HEX.encode(sharedSecret)}");
+
+              // ✅ Build TLS ServerHello handshake bytes
+              late Uint8List serverPub;
+
+              if (ks.group == 0x001D) {
+                serverPub = quicSession.x25519.publicKey;
+              } else {
+                serverPub = quicSession.p256Pub;
+              }
+
+              final shBytes = buildServerHelloBytes(
+                serverRandom: quicSession.serverRandom,
+                serverKeyShare: serverPub,
+                cipherSuite: 0x1301,
+                group: ks.group,
+              );
+
+              // ✅ Store ServerHello in transcript
+              quicSession.transcript.add(shBytes);
+              print("✅ Added ServerHello to transcript");
+
+              // ✅ Wrap TLS message in a QUIC CRYPTO frame
+              final shCryptoFrame = buildCryptoFrame(shBytes);
+
+              // ✅ Encrypt server flight #1 with Initial Write keys
+              final ciphertext = quicAeadEncrypt(
+                key: quicSession.initialWrite!.key,
+                iv: quicSession.initialWrite!.iv,
+                packetNumber: 1,
+                plaintext: shCryptoFrame,
+                aad: Uint8List(0),
+              );
+
+              if (ciphertext == null) {
+                print("❌ Failed to AEAD-encrypt ServerHello");
+                return;
+              }
+
+              // ✅ Build the QUIC Initial packet
+              final initialResponse = buildInitialPacket(
+                dcid: scid, // client SCID becomes server DCID
+                scid: dcid, // server SCID is our original DCID
+                packetNumber: 1,
+                payload: ciphertext,
+              );
+
+              // ✅ SEND ServerHello
+              socket.send(initialResponse, address, port);
+
+              print("✅✅ Sent ServerHello in QUIC Initial Packet");
+            }
+          } catch (e) {
+            print('Error processing Initial packet: $e');
+            rethrow;
+          }
+        }
+      } else {
+        // For existing sessions receiving Handshake/0RTT Long Headers,
+        // decryption is required here using the appropriate negotiated keys.
+        // For now, we print a warning as the required session state is missing:
+        print(
+          'WARNING: Received Long Header for existing session. Decryption skipped (missing session key state).',
+        );
+      }
+    } else {
+      // Short Header (1RTT)
+      // Needs to look up session using the DCID.
+
+      // Placeholder DCID extraction (e.g., assuming first 8 bytes after Type)
+      if (msg.length < 9) return;
+      // dcid = msg.sublist(1, 9);
+      dcidHex = HEX.encode(dcid);
+
+      var quicSession = _quicSessions[dcidHex];
+      if (quicSession != null) {
+        // FIX: Short Header (1RTT) packets must be decrypted.
+        // In a real implementation, the session must provide the 1-RTT read keys and largest PN.
+        try {
+          // Placeholder keys - Replace with quicSession.oneRttReadKey, etc.
+          // Note: These must match the cipher suite lengths (16/12/16 for AES-128-GCM)
+          final mockKey = Uint8List(16);
+          final mockIv = Uint8List(12);
+          final mockHp = Uint8List(16);
+
+          final decryptedPacket = decryptQuicPacket(
+            msg,
+            mockKey, // Session's current 1-RTT read key
+            mockIv, // Session's current 1-RTT read IV
+            mockHp, // Session's current 1-RTT read HP key
+            dcid,
+            0, // Replace with session's largestPn received
+          );
+
+          if (decryptedPacket != null && decryptedPacket.plaintext != null) {
+            // Pass the plaintext frames to the session handler
+            quicSession.handleDecryptedPacket(decryptedPacket.plaintext!);
+          } else {
+            print('Short Header decryption failed.');
+          }
+        } catch (e) {
+          print('Error processing Short Header packet: $e');
+        }
+      }
+    }
+  }
+
+  void _onPacket(Datagram dg) {
+    print('processing packet:');
+    _receivingQuicPacket(dg.address, dg.port, dg.data);
+    print('processing packet finished');
+    // try {
+    //   // ------------------------------------------------------------
+    //   // 1) Parse Initial Packet
+    //   // ------------------------------------------------------------
+    //   final pkt = QuicInitialPacket.parse(dg.data);
+    //   print("Quic packet: $pkt");
+
+    //   // ✅ Track PN for multi-range ACK
+    //   receivedPns.add(pkt.packetNumber);
+    //   if (pkt.packetNumber > largestReceived) {
+    //     largestReceived = pkt.packetNumber;
+    //   }
+
+    //   final v = Version.fromValue(0x00000001);
+
+    //   final (serverSealer, serverOpener) = newInitialAEAD(
+    //     pkt.dcid,
+    //     Perspective.server,
+    //     v,
+    //   );
+
+    //   serverOpener.open(cipherText, pn, ad)
+
+    //   // ------------------------------------------------------------
+    //   // 2) Derive initial secrets (read side)
+    //   // ------------------------------------------------------------
+    //   // final (clientSecret, serverSecret) = computeSecrets(pkt.dcid, v);
+    //   // expect(clientSecret, equals(tt['expectedClientSecret']));
+
+    //   // final (key, iv) = computeInitialKeyAndIV(serverSecret, v);
+
+    //   // final trafficSecret = key;
+    //   // final label = hkdfHeaderProtectionLabel(v);
+
+    //   // final hpKey = hkdfExpandLabel(
+    //   //   secret: trafficSecret,
+    //   //   context: Uint8List(0),
+    //   //   label: label,
+    //   //   length: 16,
+    //   // );
+    //   // print(
+    //   //   "key: ${HEX.encode(key)}, iv: ${HEX.encode(iv)}, hpkey: ${HEX.encode(hpKey)}",
+    //   // );
+    //   final initSecrets = quicDeriveInitialSecrets(
+    //     dcid: pkt.dcid,
+    //     version: 0x00000001,
+    //     forRead: true,
+    //   );
+
+    //   print("Initial secrets: $initSecrets");
+
+    //   final plaintext = quicAeadDecrypt(
+    //     key: key,
+    //     iv: iv,
+    //     packetNumber: pkt.packetNumber,
+    //     ciphertextWithTag: pkt.payload,
+    //     aad: Uint8List(0),
+    //   );
+
+    //   if (plaintext == null) {
+    //     print("❌ Initial AEAD decrypt failed");
+    //     return;
+    //   }
+
+    //   // ------------------------------------------------------------
+    //   // 3) Extract CRYPTO(ClientHello)
+    //   // ------------------------------------------------------------
+    //   final br = ByteReader(plaintext);
+    //   if (br.readUint8() != 0x06) return;
+
+    //   br.readUint8(); // offset
+    //   final len = br.readUint8();
+    //   final chBytes = br.readBytes(len);
+
+    //   transcript.add(chBytes);
+
+    //   final ch = ClientHello.deserialize(ByteReader(chBytes));
+    //   final clientPub = ch.parsedExtensions
+    //       .whereType<ClientHelloKeyShare>()
+    //       .first
+    //       .keyExchange;
+
+    //   // ------------------------------------------------------------
+    //   // ✅ SEND ACK FOR CLIENT INITIAL
+    //   // ------------------------------------------------------------
+    //   final ackFrame = buildAckFromSet(
+    //     receivedPns,
+    //     ackDelayMicros: 0,
+    //     ect0: 0,
+    //     ect1: 0,
+    //     ce: 0,
+    //   );
+
+    //   final ackBytes = ackFrame.encode();
+    //   final ackCrypto = buildCryptoFrame(ackBytes);
+
+    //   final ackCiphertext = quicAeadEncrypt(
+    //     key: quicDeriveInitialSecrets(
+    //       dcid: pkt.dcid,
+    //       version: 0x00000001,
+    //       forRead: false,
+    //     ).key,
+    //     iv: quicDeriveInitialSecrets(
+    //       dcid: pkt.dcid,
+    //       version: 0x00000001,
+    //       forRead: false,
+    //     ).iv,
+    //     packetNumber: 1,
+    //     plaintext: ackCrypto,
+    //     aad: Uint8List(0),
+    //   );
+
+    //   if (ackCiphertext != null) {
+    //     final ackPacket = buildInitialPacket(
+    //       dcid: pkt.scid,
+    //       scid: pkt.dcid,
+    //       packetNumber: 1,
+    //       payload: ackCiphertext,
+    //     );
+    //     socket.send(ackPacket, dg.address, dg.port);
+    //     print("✅ Sent ACK for Client Initial");
+    //   }
+
+    //   // ------------------------------------------------------------
+    //   // 4) X25519 Key Exchange
+    //   // ------------------------------------------------------------
+    //   final serverKP = QuicKeyPair.generate();
+    //   final sharedSecret = serverKP.exchange(clientPub);
+
+    //   // ------------------------------------------------------------
+    //   // 5) Build and Send ServerHello
+    //   // ------------------------------------------------------------
+    //   final sh = ServerHello.buildForQuic(
+    //     keySharePublic: serverKP.publicKey,
+    //     cipherSuite: CipherSuite.aes128gcm,
+    //   );
+
+    //   final shBytes = sh.serialize();
+    //   transcript.add(shBytes);
+
+    //   final shCrypto = buildCryptoFrame(shBytes);
+
+    //   final initialWrite = quicDeriveInitialSecrets(
+    //     dcid: pkt.dcid,
+    //     version: 0x00000001,
+    //     forRead: false,
+    //   );
+
+    //   final shCiphertext = quicAeadEncrypt(
+    //     key: initialWrite.key,
+    //     iv: initialWrite.iv,
+    //     packetNumber: 2,
+    //     plaintext: shCrypto,
+    //     aad: Uint8List(0),
+    //   );
+
+    //   final initialPacket = buildInitialPacket(
+    //     dcid: pkt.scid,
+    //     scid: pkt.dcid,
+    //     packetNumber: 2,
+    //     payload: shCiphertext!,
+    //   );
+
+    //   socket.send(initialPacket, dg.address, dg.port);
+    //   print("✅ Sent ServerHello");
+
+    //   // ------------------------------------------------------------
+    //   // 6) Derive Handshake Secrets
+    //   // ------------------------------------------------------------
+    //   final helloHash = createHash(_concat(transcript));
+
+    //   final handshakeSecret = hkdfExtract(
+    //     Uint8List(helloHash.length),
+    //     salt: helloHash,
+    //   );
+
+    //   final serverHsTS = quicHkdfExpandLabel(
+    //     secret: handshakeSecret,
+    //     label: "s hs traffic",
+    //     context: helloHash,
+    //     length: 32,
+    //   );
+
+    //   final serverHsKey = quicHkdfExpandLabel(
+    //     secret: serverHsTS,
+    //     label: "key",
+    //     context: Uint8List(0),
+    //     length: 16,
+    //   );
+
+    //   final serverHsIv = quicHkdfExpandLabel(
+    //     secret: serverHsTS,
+    //     label: "iv",
+    //     context: Uint8List(0),
+    //     length: 12,
+    //   );
+
+    //   // ------------------------------------------------------------
+    //   // 7) EE, Cert, CertVerify, Finished
+    //   // ------------------------------------------------------------
+    //   final ee = EncryptedExtensions.build();
+    //   transcript.add(ee);
+
+    //   final certMsg = buildCertificateMessage(cert.cert);
+    //   transcript.add(certMsg);
+
+    //   final certHash = createHash(_concat(transcript));
+    //   final certVerify = buildCertificateVerify(
+    //     privateKeyBytes: cert.privateKey,
+    //     transcriptHash: certHash,
+    //   );
+    //   transcript.add(certVerify);
+
+    //   final finHash = createHash(_concat(transcript));
+    //   final finishedKey = quicHkdfExpandLabel(
+    //     secret: serverHsTS,
+    //     label: "finished",
+    //     context: Uint8List(0),
+    //     length: 32,
+    //   );
+    //   final fin = FinishedMessage.build(
+    //     finishedKey: finishedKey,
+    //     transcriptHash: finHash,
+    //   );
+    //   transcript.add(fin);
+
+    //   // ------------------------------------------------------------
+    //   // 8) Send Handshake packet
+    //   // ------------------------------------------------------------
+    //   final hsFlight = _concat([ee, certMsg, certVerify, fin]);
+    //   final hsCrypto = buildCryptoFrame(hsFlight);
+
+    //   final hsCiphertext = quicAeadEncrypt(
+    //     key: serverHsKey,
+    //     iv: serverHsIv,
+    //     packetNumber: 1,
+    //     plaintext: hsCrypto,
+    //     aad: Uint8List(0),
+    //   );
+
+    //   final hsPacket = buildHandshakePacket(
+    //     dcid: pkt.scid,
+    //     scid: pkt.dcid,
+    //     packetNumber: 1,
+    //     payload: hsCiphertext!,
+    //   );
+
+    //   socket.send(hsPacket, dg.address, dg.port);
+    //   print("✅ Sent EE + Certificate + CertVerify + Finished");
+    // } catch (e, st) {
+    //   print("❌ QUIC Handshake Error: $e");
+    //   print(st);
+    // }
   }
 }
 
-//
-// ===================================================================
+// ================================================================
 // Entry
-// ===================================================================
+// ================================================================
 void main() async {
   final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 4433);
-  final server = QuicServer(sock);
-  server.start();
+  QuicServerB(sock).start();
 }
