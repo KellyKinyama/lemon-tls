@@ -1,40 +1,42 @@
 import 'dart:typed_data';
-// import '../byte_reader.dart';
+
+import 'tls_messages.dart';
 
 Uint8List _u8(int v) => Uint8List.fromList([v & 0xff]);
-Uint8List _u16(int v) {
+Uint8List _u16be(int v) {
   final x = Uint8List(2);
   x[0] = (v >> 8) & 0xff;
   x[1] = v & 0xff;
   return x;
 }
 
-Uint8List _concat(List<Uint8List> xs) {
-  final total = xs.fold(0, (a, b) => a + b.length);
-  final out = Uint8List(total);
-  int o = 0;
-  for (final b in xs) {
-    out.setRange(o, o + b.length, b);
-    o += b.length;
+Uint8List buildEncryptedExtensions(List<TlsExtension> extensions) {
+  // final builder = BytesBuilder();
+
+  // Build extension block
+  final extBytes = BytesBuilder();
+  for (final ext in extensions) {
+    extBytes.add(_u16be(ext.type));
+    extBytes.add(_u16be(ext.data.length));
+    extBytes.add(ext.data);
   }
-  return out;
-}
 
-/// QUIC‑toy EncryptedExtensions:
-/// No ALPN, no QUIC transport params, no SNI response.
-class EncryptedExtensions {
-  static Uint8List build() {
-    final extensions = Uint8List(0); // no extensions
+  final extList = extBytes.toBytes();
 
-    final body = _concat([_u16(extensions.length), extensions]);
+  // Prepend extension list length
+  final body = BytesBuilder();
+  body.add(_u16be(extList.length));
+  body.add(extList);
 
-    final header = [
-      0x08,
-      (body.length >> 16) & 0xff,
-      (body.length >> 8) & 0xff,
-      body.length & 0xff,
-    ];
+  final bodyBytes = body.toBytes();
 
-    return Uint8List.fromList([...header, ...body]);
-  }
+  // TLS Handshake Header: type=0x08, length=3 bytes
+  final header = Uint8List.fromList([
+    0x08,
+    (bodyBytes.length >> 16) & 0xff,
+    (bodyBytes.length >> 8) & 0xff,
+    bodyBytes.length & 0xff,
+  ]);
+
+  return Uint8List.fromList([...header, ...bodyBytes]);
 }

@@ -176,10 +176,20 @@ class QuicServerB {
 
   void start() {
     print("✅ QUIC Option-B server listening on UDP ${socket.port}");
-    socket.listen((ev) {
-      if (ev == RawSocketEvent.read) {
+
+    socket.listen((event) {
+      if (event == RawSocketEvent.read) {
         final dg = socket.receive();
-        if (dg != null) _onPacket(dg);
+        if (dg != null) {
+          // ✅ NEVER PROCESS PACKETS ORIGINATING FROM OUR OWN SOCKET
+          if (dg.port == socket.port) {
+            // This is a self-sent packet → ignore it
+            print("⚠️ Ignoring self-received packet (loopback).");
+            return;
+          }
+
+          _onPacket(dg);
+        }
       }
     });
   }
@@ -332,6 +342,43 @@ class QuicServerB {
               //   port: port,
               // );
               // _quicSessions[dcidHex] = quicSession;
+              // ✅ After decrypting Initial packet
+              // ✅ ALWAYS ACK any Initial packet after decryption
+              receivedPns.add(decryptedPacket.packetNumber);
+
+              final ackFrame = buildAckFromSet(
+                receivedPns,
+                ackDelayMicros: 0,
+                ect0: 0,
+                ect1: 0,
+                ce: 0,
+              );
+
+              // ACK is a plain frame, NOT a CRYPTO frame
+              final ackPayload = ackFrame.encode();
+
+              final ackCipher = quicAeadEncrypt(
+                key: quicSession.initialWrite!.key,
+                iv: quicSession.initialWrite!.iv,
+                packetNumber:
+                    decryptedPacket.packetNumber + 1, // next server PN
+                plaintext: ackPayload,
+                aad: Uint8List(0),
+              );
+
+              if (ackCipher != null) {
+                final ackPacket = buildInitialPacket(
+                  dcid: scid,
+                  scid: dcid,
+                  packetNumber: decryptedPacket.packetNumber + 1,
+                  payload: ackCipher,
+                );
+
+                socket.send(ackPacket, address, port);
+                print(
+                  "✅ Sent ACK for Client Initial PN=${decryptedPacket.packetNumber}",
+                );
+              }
 
               // // Pass the plaintext frames to the session handler
               quicSession!.handleDecryptedPacket(decryptedPacket.plaintext!);
@@ -419,6 +466,133 @@ class QuicServerB {
               socket.send(initialResponse, address, port);
 
               print("✅✅ Sent ServerHello in QUIC Initial Packet");
+
+              // ---------------------------------------------------------------------------
+              // ✅ HANDSHAKE FLIGHT #2 (EncryptedExtensions + Certificate + CertVerify + Finished)
+              // ---------------------------------------------------------------------------
+
+              // 1. Compute transcript hash (CH + SH)
+              final helloHash = createHash(_concat(quicSession.transcript));
+
+              // 2. Derive Handshake Secret
+              final handshakeSecret = hkdfExtract(
+                Uint8List(
+                  helloHash.length,
+                ), // salt is zero vector of hash length
+                salt: helloHash,
+              );
+
+              // 3. Derive server handshake traffic secret
+              final serverHsTS = hkdfExpandLabel(
+                secret: handshakeSecret,
+                label: "s hs traffic",
+                context: helloHash,
+                length: 32,
+              );
+
+              // 4. Derive handshake AEAD keys
+              final serverHsKey = hkdfExpandLabel(
+                secret: serverHsTS,
+                label: "key",
+                context: Uint8List(0),
+                length: 16,
+              );
+
+              final serverHsIv = hkdfExpandLabel(
+                secret: serverHsTS,
+                label: "iv",
+                context: Uint8List(0),
+                length: 12,
+              );
+
+              print("✅ Handshake Traffic Secret derived");
+              print("✅ HS key=${HEX.encode(serverHsKey)}");
+              print("✅ HS iv =${HEX.encode(serverHsIv)}");
+
+              // ---------------------------------------------------------------------------
+              // ✅ 5. Build EncryptedExtensions
+              // ---------------------------------------------------------------------------
+              // For now, send empty extension list (QUIC allows this)
+              final ee = buildEncryptedExtensions([]);
+
+              // Add to transcript
+              quicSession.transcript.add(ee);
+
+              // ---------------------------------------------------------------------------
+              // ✅ 6. Send Certificate
+              // ---------------------------------------------------------------------------
+              final certMsg = buildCertificateMessage([cert.cert]);
+              quicSession.transcript.add(certMsg);
+
+              // ---------------------------------------------------------------------------
+              // ✅ 7. CertificateVerify
+              // ---------------------------------------------------------------------------
+              final certHash = createHash(_concat(quicSession.transcript));
+
+              final certSig = buildCertificateVerify(
+                privateKeyBytes: cert.privateKey,
+                transcriptHash: certHash,
+              );
+
+              // CertificateVerify is a full handshake message
+              quicSession.transcript.add(certSig);
+
+              // ---------------------------------------------------------------------------
+              // ✅ 8. Finished
+              // ---------------------------------------------------------------------------
+              final finHash = createHash(_concat(quicSession.transcript));
+
+              final finishedKey = hkdfExpandLabel(
+                secret: serverHsTS,
+                label: "finished",
+                context: Uint8List(0),
+                length: 32,
+              );
+
+              final verifyData = hmacSha256(key: finishedKey, data: finHash);
+              final finished = buildFinishedMessage(verifyData);
+
+              // Add to transcript
+              quicSession.transcript.add(finished);
+
+              // ---------------------------------------------------------------------------
+              // ✅ 9. Pack full handshake flight into one CRYPTO frame
+              // ---------------------------------------------------------------------------
+              final hsFlight = _concat([ee, certMsg, certSig, finished]);
+
+              final hsCryptoFrame = buildCryptoFrame(hsFlight);
+
+              // ---------------------------------------------------------------------------
+              // ✅ 10. Encrypt handshake packet
+              // ---------------------------------------------------------------------------
+              final hsCiphertext = quicAeadEncrypt(
+                key: serverHsKey,
+                iv: serverHsIv,
+                packetNumber: 2,
+                plaintext: hsCryptoFrame,
+                aad: Uint8List(0),
+              );
+
+              if (hsCiphertext == null) {
+                print("❌ Failed to encrypt handshake flight");
+                return;
+              }
+
+              // ---------------------------------------------------------------------------
+              // ✅ 11. Build QUIC Handshake packet
+              // ---------------------------------------------------------------------------
+              final hsPacket = buildHandshakePacket(
+                dcid: scid,
+                scid: dcid,
+                packetNumber: 2,
+                payload: hsCiphertext,
+              );
+
+              // ---------------------------------------------------------------------------
+              // ✅ 12. Send handshake flight
+              // ---------------------------------------------------------------------------
+              socket.send(hsPacket, address, port);
+              print("✅✅ Sent EE + Certificate + CertVerify + Finished");
             }
           } catch (e) {
             print('Error processing Initial packet: $e');

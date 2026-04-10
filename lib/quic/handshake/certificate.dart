@@ -1,45 +1,49 @@
-// lib/handshake/certificate.dart
 import 'dart:typed_data';
 
-Uint8List _u8(int v) => Uint8List.fromList([v & 0xff]);
-Uint8List _u16(int v) => Uint8List.fromList([(v >> 8) & 0xff, v & 0xff]);
+Uint8List buildCertificateMessage(List<Uint8List> certChain) {
+  final builder = BytesBuilder();
 
-Uint8List _u24(int v) =>
-    Uint8List.fromList([(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]);
+  // Context length = 0 for QUIC/TLS 1.3
+  builder.addByte(0x00);
 
-Uint8List _concat(List<Uint8List> xs) {
-  final total = xs.fold(0, (s, b) => s + b.length);
-  final out = Uint8List(total);
-  int o = 0;
-  for (final x in xs) {
-    out.setRange(o, o + x.length, x);
-    o += x.length;
+  // Build certificate list
+  final certListBuilder = BytesBuilder();
+
+  for (final cert in certChain) {
+    // Cert length (3 bytes)
+    certListBuilder.add([
+      (cert.length >> 16) & 0xff,
+      (cert.length >> 8) & 0xff,
+      cert.length & 0xff,
+    ]);
+
+    // Certificate data
+    certListBuilder.add(cert);
+
+    // Extensions length = 0 (no per‑certificate extensions)
+    certListBuilder.add([0x00, 0x00]);
   }
-  return out;
-}
 
-/// TLS 1.3 Certificate message (QUIC-compatible)
-Uint8List buildCertificateMessage(Uint8List certDer) {
-  final certLen = _u24(certDer.length);
+  final certList = certListBuilder.toBytes();
 
-  final entry = _concat([
-    certLen,
-    certDer,
-    _u16(0x0000), // extensions length = 0
+  // Certificate_list length (3 bytes)
+  builder.add([
+    (certList.length >> 16) & 0xff,
+    (certList.length >> 8) & 0xff,
+    certList.length & 0xff,
   ]);
 
-  final body = _concat([
-    _u8(0x00), // certificate_request_context length = 0
-    _u24(entry.length),
-    entry,
-  ]);
+  builder.add(certList);
 
-  final hdr = Uint8List.fromList([
-    0x0B, // handshake type = certificate
+  final body = builder.toBytes();
+
+  // Handshake header (type=0x0B)
+  final header = Uint8List.fromList([
+    0x0B,
     (body.length >> 16) & 0xff,
     (body.length >> 8) & 0xff,
     body.length & 0xff,
   ]);
 
-  return Uint8List.fromList([...hdr, ...body]);
+  return Uint8List.fromList([...header, ...body]);
 }
