@@ -1,7 +1,13 @@
 import 'dart:typed_data';
+import 'package:hex/hex.dart';
 
 import '../buffer.dart';
 import 'client_hello.dart';
+import 'server_hello.dart';
+import 'encrypted_extensions.dart';
+import 'certificate.dart';
+import 'certificate_verify.dart';
+import 'finished.dart';
 
 abstract class TlsHandshakeMessage {
   final int msgType;
@@ -12,6 +18,7 @@ abstract class TlsHandshakeMessage {
 class UnknownHandshakeMessage extends TlsHandshakeMessage {
   final Uint8List body;
   UnknownHandshakeMessage(int msgType, this.body) : super(msgType);
+
   @override
   String toString() =>
       'ℹ️ Parsed UnknownHandshake(type: $msgType, len: ${body.length})';
@@ -20,9 +27,13 @@ class UnknownHandshakeMessage extends TlsHandshakeMessage {
 class TlsExtension {
   final int type;
   final Uint8List data;
-  TlsExtension(this.type, this.data);
+  int length;
+
+  TlsExtension({required this.type, required this.length, required this.data});
+
   String get typeName =>
       extensionTypesMap[type] ?? 'Unknown (0x${type.toRadixString(16)})';
+
   @override
   String toString() => '  - Ext: $typeName, Length: ${data.length}';
 }
@@ -30,28 +41,66 @@ class TlsExtension {
 List<TlsHandshakeMessage> parseTlsMessages(Uint8List cryptoData) {
   final buffer = QuicBuffer(data: cryptoData);
   final messages = <TlsHandshakeMessage>[];
+
   while (buffer.remaining > 0) {
     final msgType = buffer.pullUint8();
     final length = buffer.pullUint24();
-    final messageBuffer = QuicBuffer(data: buffer.pullBytes(length));
+
+    print("handshake length: $length");
+
+    final body = buffer.pullBytes(length);
+    final bodyBuf = QuicBuffer(data: body);
 
     switch (msgType) {
       case 0x01: // ClientHello
-        messages.add(parseClientHelloBody(messageBuffer));
+        final ch = parseClientHelloBody(bodyBuf);
+        print("Serialized: ${HEX.encode(ch.build_tls_client_hello())}");
+        messages.add(ch);
         break;
+
+      case 0x02: // ServerHello
+        print("✅ ServerHello received (${length} bytes)");
+        final sh = ServerHello.parse(bodyBuf);
+        messages.add(sh);
+        break;
+
+      case 0x08: // Encrypted Extensions
+        print("✅ EncryptedExtensions received (${length} bytes)");
+        final ee = EncryptedExtensions.parse(bodyBuf);
+        messages.add(ee);
+        break;
+
+      case 0x0B: // Certificate
+        print("✅ Certificate received (${length} bytes)");
+        final cert = CertificateMessage.parse(bodyBuf);
+        messages.add(cert);
+        break;
+
+      case 0x0F: // CertificateVerify
+        print("✅ CertificateVerify received (${length} bytes)");
+        final cv = CertificateVerify.parse(bodyBuf);
+        messages.add(cv);
+        break;
+
+      case 0x14: // Finished
+        print("✅ Finished received (${length} bytes)");
+        final fin = FinishedMessage.parse(bodyBuf);
+        messages.add(fin);
+        break;
+
       default:
+        print("⚠️ Unknown handshake message: type=$msgType len=$length");
         messages.add(
-          UnknownHandshakeMessage(
-            msgType,
-            messageBuffer.pullBytes(messageBuffer.length),
-          ),
+          UnknownHandshakeMessage(msgType, bodyBuf.pullBytes(bodyBuf.length)),
         );
+        break;
     }
   }
+
   return messages;
 }
 
-// --- Helper Maps for readable output ---
+// --- Helper Maps ---
 const Map<int, String> handshakeTypeMap = {
   1: 'ClientHello',
   2: 'ServerHello',
@@ -60,11 +109,13 @@ const Map<int, String> handshakeTypeMap = {
   15: 'CertificateVerify',
   20: 'Finished',
 };
+
 const Map<int, String> cipherSuitesMap = {
   0x1301: 'TLS_AES_128_GCM_SHA256',
   0x1302: 'TLS_AES_256_GCM_SHA384',
   0x1303: 'TLS_CHACHA20_POLY1305_SHA256',
 };
+
 const Map<int, String> extensionTypesMap = {
   0: 'server_name',
   5: 'status_request',
@@ -78,4 +129,9 @@ const Map<int, String> extensionTypesMap = {
   57: 'quic_transport_parameters',
   28: 'session_ticket',
   13: 'signature_algorithms',
+};
+
+const Map<int, String> supportedGroupsMap = {
+  0x001d: "X25519",
+  0x0017: "secp256r1",
 };

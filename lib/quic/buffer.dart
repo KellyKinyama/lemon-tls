@@ -36,6 +36,7 @@ class QuicBuffer {
   int get remaining => length - _readOffset;
   ByteData get byteData => _byteData;
   int get readOffset => _readOffset;
+  int get writeIndex => _writeIndex;
   Uint8List get data => _byteData.buffer.asUint8List(0);
 
   /// The total capacity of the buffer.
@@ -228,7 +229,7 @@ class QuicBuffer {
   // }
 
   // CORRECTION 4: Fix for 8-byte (64-bit) var-int encoding
-  void pushUintVar(int value) {
+  void pushVarint(int value) {
     if (value < 0x40) {
       // 1-byte
       _ensureCapacity(1);

@@ -6,6 +6,11 @@ import 'package:ecdsa/ecdsa.dart';
 import 'package:elliptic/elliptic.dart';
 import 'package:hex/hex.dart';
 
+// certificate_verify.dart
+import 'dart:typed_data';
+import '../buffer.dart';
+import 'tls_messages.dart';
+
 Uint8List _concat(List<Uint8List> items) {
   final total = items.fold<int>(0, (s, b) => s + b.length);
   final out = Uint8List(total);
@@ -90,4 +95,48 @@ bool verifyCertificateVerify({
   final pub = PublicKey.fromHex(getP256(), HEX.encode(publicKeyBytes));
   final sig = Signature.fromASN1(signatureBytes);
   return verify(pub, transcriptHash.toList(), sig);
+}
+
+class CertificateVerify extends TlsHandshakeMessage {
+  final int algorithm;
+  final Uint8List signature;
+
+  CertificateVerify({required this.algorithm, required this.signature})
+    : super(0x0F);
+
+  // ---------------------------------------------------------
+  // ✅ PARSER
+  // ---------------------------------------------------------
+  static CertificateVerify parse(QuicBuffer buf) {
+    final alg = buf.pullUint16();
+    final sigLen = buf.pullUint16();
+    final sig = buf.pullBytes(sigLen);
+
+    return CertificateVerify(algorithm: alg, signature: sig);
+  }
+
+  // ---------------------------------------------------------
+  // ✅ BUILDER  (matches JS build_certificate_verify)
+  // ---------------------------------------------------------
+  Uint8List build() {
+    final body = BytesBuilder()
+      ..add([(algorithm >> 8) & 0xFF, algorithm & 0xFF])
+      ..add([(signature.length >> 8) & 0xFF, signature.length & 0xFF])
+      ..add(signature);
+
+    final bodyBytes = body.toBytes();
+
+    final header = [
+      msgType,
+      (bodyBytes.length >> 16) & 0xFF,
+      (bodyBytes.length >> 8) & 0xFF,
+      bodyBytes.length & 0xFF,
+    ];
+
+    return Uint8List.fromList([...header, ...bodyBytes]);
+  }
+
+  @override
+  String toString() =>
+      "✅ CertificateVerify(alg=0x${algorithm.toRadixString(16)})";
 }

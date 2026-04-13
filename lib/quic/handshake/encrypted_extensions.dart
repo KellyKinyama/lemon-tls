@@ -1,42 +1,65 @@
+// encrypted_extensions.dart
 import 'dart:typed_data';
-
+import '../buffer.dart';
 import 'tls_messages.dart';
 
-Uint8List _u8(int v) => Uint8List.fromList([v & 0xff]);
-Uint8List _u16be(int v) {
-  final x = Uint8List(2);
-  x[0] = (v >> 8) & 0xff;
-  x[1] = v & 0xff;
-  return x;
-}
+class EncryptedExtensions extends TlsHandshakeMessage {
+  final List<TlsExtension> extensions;
 
-Uint8List buildEncryptedExtensions(List<TlsExtension> extensions) {
-  // final builder = BytesBuilder();
+  EncryptedExtensions({required this.extensions})
+    : super(0x08); // handshake type
 
-  // Build extension block
-  final extBytes = BytesBuilder();
-  for (final ext in extensions) {
-    extBytes.add(_u16be(ext.type));
-    extBytes.add(_u16be(ext.data.length));
-    extBytes.add(ext.data);
+  // ---------------------------------------------------------
+  // ✅ PARSER
+  // body format:
+  //   uint16 extensions_length
+  //   Extension extensions[extensions_length]
+  // ---------------------------------------------------------
+  static EncryptedExtensions parse(QuicBuffer buf) {
+    final extTotalLen = buf.pullUint16();
+    final end = buf.readOffset + extTotalLen;
+
+    final exts = <TlsExtension>[];
+
+    while (buf.readOffset < end) {
+      final type = buf.pullUint16();
+      final len = buf.pullUint16();
+      final data = buf.pullBytes(len);
+      exts.add(TlsExtension(type: type, length: len, data: data));
+    }
+
+    return EncryptedExtensions(extensions: exts);
   }
 
-  final extList = extBytes.toBytes();
+  // ---------------------------------------------------------
+  // ✅ BUILDER (like JS build_encrypted_extensions)
+  // ---------------------------------------------------------
+  Uint8List build() {
+    final extBytes = BytesBuilder();
 
-  // Prepend extension list length
-  final body = BytesBuilder();
-  body.add(_u16be(extList.length));
-  body.add(extList);
+    for (final ext in extensions) {
+      extBytes.add([(ext.type >> 8) & 0xFF, ext.type & 0xFF]);
+      extBytes.add([(ext.data.length >> 8) & 0xFF, ext.data.length & 0xFF]);
+      extBytes.add(ext.data);
+    }
 
-  final bodyBytes = body.toBytes();
+    final extList = extBytes.toBytes();
 
-  // TLS Handshake Header: type=0x08, length=3 bytes
-  final header = Uint8List.fromList([
-    0x08,
-    (bodyBytes.length >> 16) & 0xff,
-    (bodyBytes.length >> 8) & 0xff,
-    bodyBytes.length & 0xff,
-  ]);
+    final body = BytesBuilder()
+      ..add([(extList.length >> 8) & 0xFF, extList.length & 0xFF])
+      ..add(extList);
 
-  return Uint8List.fromList([...header, ...bodyBytes]);
+    final bodyBytes = body.toBytes();
+    final header = [
+      msgType,
+      (bodyBytes.length >> 16) & 0xFF,
+      (bodyBytes.length >> 8) & 0xFF,
+      bodyBytes.length & 0xFF,
+    ];
+
+    return Uint8List.fromList([...header, ...bodyBytes]);
+  }
+
+  @override
+  String toString() => "✅ EncryptedExtensions(${extensions.length} extensions)";
 }

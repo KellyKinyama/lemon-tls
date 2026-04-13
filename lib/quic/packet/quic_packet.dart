@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:hex/hex.dart';
 
+import '../quic_session.dart';
 import '../utils.dart';
 import 'crypto_utils.dart';
 import 'header_protector.dart';
@@ -25,181 +26,405 @@ class QuicDecryptedPacket {
 ///
 /// Returns a [QuicDecryptedPacket] containing the plaintext and metadata, or `null`
 /// if decryption/authentication fails.
+// QuicDecryptedPacket? decryptQuicPacket(
+//   Uint8List array,
+//   Uint8List readKey,
+//   Uint8List readIv,
+//   Uint8List readHp,
+//   Uint8List dcid, // Required for Short Header parsing
+//   int largestPn, // Largest packet number received so far
+// ) {
+//   // ✅ Log keys used for decrypt
+//   print('--- decryptQuicPacket keys ---');
+//   print('READ.key = ${HEX.encode(readKey)}');
+//   print('READ.iv  = ${HEX.encode(readIv)}');
+//   print('READ.hp  = ${HEX.encode(readHp)}');
+//   print('dcid     = ${HEX.encode(dcid)}');
+//   print('pkt[0]   = 0x${array[0].toRadixString(16).padLeft(2, '0')}');
+//   print('pkt.len  = ${array.length}');
+
+//   // Use a mutable copy of the input array because `removeHeaderProtection` modifies it.
+//   // Dart's `Uint8List.fromList` creates a deep copy.
+//   final mutableArray = Uint8List.fromList(array);
+
+//   final firstByte = mutableArray[0];
+//   final isShort = (firstByte & 0x80) == 0;
+
+//   // Variables to be populated
+//   bool keyPhase = false;
+//   int pnOffset = 0;
+//   int pnLength = 0;
+//   late Uint8List aad;
+//   late Uint8List ciphertext;
+//   late Uint8List tag;
+//   int? packetNumber;
+//   Uint8List? nonce;
+
+//   try {
+//     if (!isShort) {
+//       // ---------- Long Header Parsing ----------
+//       final view = ByteData.view(
+//         mutableArray.buffer,
+//         mutableArray.offsetInBytes,
+//         mutableArray.length,
+//       );
+//       if (mutableArray.length < 6) throw Exception("Truncated Long Header");
+
+//       // Version is at offset 1 (4 bytes)
+//       // final version = view.getUint32(1, Endian.big); // Not used for decryption, but available
+
+//       // Destination Connection ID (DCID) Length is at offset 5
+//       final dcidLen = mutableArray[5];
+
+//       int offset = 6;
+//       offset += dcidLen; // Skip DCID
+
+//       if (offset >= mutableArray.length) {
+//         throw Exception("Truncated Long Header (SCID length missing)");
+//       }
+
+//       final scidLen = mutableArray[offset++];
+//       offset += scidLen; // Skip Source Connection ID (SCID)
+
+//       if (offset >= mutableArray.length) {
+//         throw Exception("Truncated Long Header (rest missing)");
+//       }
+
+//       final typeBits = (firstByte & 0x30) >> 4;
+
+//       // Handle Token field (Initial packets only, typeBits == 0)
+//       if (typeBits == 0) {
+//         final tokenLenVar = readVarInt(mutableArray, offset);
+//         if (tokenLenVar == null) {
+//           throw Exception("Bad varint (token len) at $offset");
+//         }
+//         offset += tokenLenVar.byteLength + tokenLenVar.value;
+//       }
+
+//       // Packet Length (VarInt)
+//       final lenVar = readVarInt(mutableArray, offset);
+//       if (lenVar == null) throw Exception("Bad varint (length) at $offset");
+//       offset += lenVar.byteLength;
+//       final payloadTotalLength = lenVar.value; // Includes PN field and AEAD tag
+
+//       pnOffset = offset;
+//       print("Packet number offset: $pnOffset");
+//       // Remove Header Protection (modifies mutableArray)
+//       pnLength = removeHeaderProtection(
+//         array: mutableArray,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: false,
+//       );
+
+//       // Decrypt details
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutableArray,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
+//       print("Packet number length: $pnLength");
+//       print("Packet number: $packetNumber");
+//       nonce = computeNonce(readIv, packetNumber);
+
+//       final payloadStart = pnOffset + pnLength;
+//       final payloadLength = lenVar.value - pnLength;
+
+//       // final payloadEnd = payloadStart + payloadTotalLength;
+//       final payloadEnd = payloadStart + payloadLength;
+
+//       if (payloadEnd > mutableArray.length) {
+//         throw Exception(
+//           "Truncated long header packet (expected $payloadEnd bytes, got ${mutableArray.length})",
+//         );
+//       }
+
+//       final payload = mutableArray.sublist(payloadStart, payloadEnd);
+//       if (payload.length < 16) {
+//         throw Exception("Encrypted payload too short (min 16 for tag)");
+//       }
+
+//       // AEAD components
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
+//       // AAD: Everything from start up to and including the revealed Packet Number
+//       aad = mutableArray.sublist(0, pnOffset + pnLength);
+//     } else {
+//       // ---------- Short Header Parsing ----------
+
+//       keyPhase = (firstByte & 0x04) != 0; // Key Phase is the 3rd bit (0x04)
+
+//       final dcidLen = dcid.length;
+//       pnOffset = 1 + dcidLen; // PN starts after 1 byte Type and DCID
+
+//       if (pnOffset + 4 > mutableArray.length) {
+//         throw Exception("Short header too short for max PN length");
+//       }
+
+//       // Remove Header Protection (modifies mutableArray)
+//       pnLength = removeHeaderProtection(
+//         array: mutableArray,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: true,
+//       );
+
+//       // Decrypt details
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutableArray,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
+//       nonce = computeNonce(readIv, packetNumber);
+
+//       final payloadStart = pnOffset + pnLength;
+//       final payload = mutableArray.sublist(payloadStart);
+//       if (payload.length < 16) {
+//         throw Exception("Encrypted payload too short (min 16 for tag)");
+//       }
+
+//       // AEAD components
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
+//       // AAD: Everything from start up to and including the revealed Packet Number
+//       aad = mutableArray.sublist(0, pnOffset + pnLength);
+//     }
+//   } catch (e, st) {
+//     // Catch header parsing or PN/Header Protection errors
+//     print("QUIC Packet Header parsing/unprotect failed: $e");
+//     print(st);
+//     return null;
+//   }
+
+//   print("Decrypting cipher text ...");
+//   // Final AEAD Decryption
+//   // plaintext will be null if the decryption fails (e.g., failed tag authentication)
+//   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce!, aad);
+//   print('✅ **Payload decrypted successfully!**');
+//   print(
+//     '✅ **Recovered Message (Hex): "${HEX.encode(plaintext!.sublist(0, 32))}"...',
+//   );
+//   // Return the result object
+//   return QuicDecryptedPacket(
+//     packetNumber: packetNumber!,
+//     keyPhase: keyPhase,
+//     plaintext: plaintext,
+//   );
+// }
+
+/// Decrypt a QUIC packet at ANY encryption level:
+///  - Initial
+///  - Handshake
+///  - 0‑RTT (not used here)
+///  - 1‑RTT
+///
+/// This version automatically selects the correct key level.
+/// Keys must already be installed into the QUICSession.
 QuicDecryptedPacket? decryptQuicPacket(
   Uint8List array,
-  Uint8List readKey,
-  Uint8List readIv,
-  Uint8List readHp,
-  Uint8List dcid, // Required for Short Header parsing
-  int largestPn, // Largest packet number received so far
+  QUICSession session,
+  int largestPn,
 ) {
-  // Use a mutable copy of the input array because `removeHeaderProtection` modifies it.
-  // Dart's `Uint8List.fromList` creates a deep copy.
-  final mutableArray = Uint8List.fromList(array);
+  final mutable = Uint8List.fromList(array);
+  final firstByte = mutable[0];
+  final isLong = (firstByte & 0x80) != 0;
 
-  final firstByte = mutableArray[0];
-  final isShort = (firstByte & 0x80) == 0;
+  // -------------------------------------------------------------
+  // ✅ Detect packet encryption level
+  // -------------------------------------------------------------
+  bool isInitial = false;
+  bool isHandshake = false;
+  bool isZeroRtt = false;
+  bool isOneRtt = false;
 
-  // Variables to be populated
-  bool keyPhase = false;
+  if (isLong) {
+    final typeBits = (firstByte >> 4) & 0x03;
+    isInitial = typeBits == 0x00;
+    isZeroRtt = typeBits == 0x01;
+    isHandshake = typeBits == 0x02;
+  } else {
+    isOneRtt = true;
+  }
+
+  // -------------------------------------------------------------
+  // ✅ Select read keys depending on encryption level
+  // -------------------------------------------------------------
+  Uint8List readKey, readIv, readHp;
+
+  if (isInitial) {
+    if (session.initialRead == null) {
+      print("❌ No Initial read keys installed");
+      return null;
+    }
+    readKey = session.initialRead!.key;
+    readIv = session.initialRead!.iv;
+    readHp = session.initialRead!.hp;
+  } else if (isHandshake) {
+    if (session.handshakeRead == null) {
+      print("❌ No Handshake read keys installed");
+      return null;
+    }
+    readKey = session.handshakeRead!.key;
+    readIv = session.handshakeRead!.iv;
+    readHp = session.handshakeRead!.hp;
+  } else if (isOneRtt) {
+    if (session.oneRttRead == null) {
+      print("❌ No 1‑RTT read keys installed");
+      return null;
+    }
+    readKey = session.oneRttRead!.key;
+    readIv = session.oneRttRead!.iv;
+    readHp = session.oneRttRead!.hp;
+  } else {
+    print("❌ Unsupported QUIC packet type");
+    return null;
+  }
+
+  // -------------------------------------------------------------
+  // ✅ Debug key output
+  // -------------------------------------------------------------
+  print('--- decryptQuicPacket keys ---');
+  print(
+    'Level      = '
+    '${isInitial
+        ? "Initial"
+        : isHandshake
+        ? "Handshake"
+        : isOneRtt
+        ? "1‑RTT"
+        : "??"}',
+  );
+  print('READ.key   = ${HEX.encode(readKey)}');
+  print('READ.iv    = ${HEX.encode(readIv)}');
+  print('READ.hp    = ${HEX.encode(readHp)}');
+  print('pkt[0]     = 0x${array[0].toRadixString(16).padLeft(2, '0')}');
+  print('pkt.len    = ${array.length}');
+
+  // -------------------------------------------------------------
+  // ✅ Begin header parsing
+  // -------------------------------------------------------------
   int pnOffset = 0;
   int pnLength = 0;
-  late Uint8List aad;
-  late Uint8List ciphertext;
-  late Uint8List tag;
   int? packetNumber;
+  Uint8List ciphertext, tag, aad;
   Uint8List? nonce;
 
   try {
-    if (!isShort) {
-      // ---------- Long Header Parsing ----------
-      final view = ByteData.view(
-        mutableArray.buffer,
-        mutableArray.offsetInBytes,
-        mutableArray.length,
-      );
-      if (mutableArray.length < 6) throw Exception("Truncated Long Header");
+    if (isLong) {
+      // -----------------------------
+      // Long Header
+      // -----------------------------
+      int offset = 1; // skip flags
 
-      // Version is at offset 1 (4 bytes)
-      // final version = view.getUint32(1, Endian.big); // Not used for decryption, but available
+      // version
+      offset += 4;
 
-      // Destination Connection ID (DCID) Length is at offset 5
-      final dcidLen = mutableArray[5];
+      // DCID
+      final dcidLen = mutable[offset++];
+      offset += dcidLen;
 
-      int offset = 6;
-      offset += dcidLen; // Skip DCID
+      // SCID
+      final scidLen = mutable[offset++];
+      offset += scidLen;
 
-      if (offset >= mutableArray.length) {
-        throw Exception("Truncated Long Header (SCID length missing)");
+      // Initial token
+      final typeBits = (firstByte >> 4) & 0x03;
+      if (typeBits == 0x00) {
+        final t = readVarInt(mutable, offset)!;
+        offset += t.byteLength + t.value;
       }
 
-      final scidLen = mutableArray[offset++];
-      offset += scidLen; // Skip Source Connection ID (SCID)
-
-      if (offset >= mutableArray.length) {
-        throw Exception("Truncated Long Header (rest missing)");
-      }
-
-      final typeBits = (firstByte & 0x30) >> 4;
-
-      // Handle Token field (Initial packets only, typeBits == 0)
-      if (typeBits == 0) {
-        final tokenLenVar = readVarInt(mutableArray, offset);
-        if (tokenLenVar == null) {
-          throw Exception("Bad varint (token len) at $offset");
-        }
-        offset += tokenLenVar.byteLength + tokenLenVar.value;
-      }
-
-      // Packet Length (VarInt)
-      final lenVar = readVarInt(mutableArray, offset);
-      if (lenVar == null) throw Exception("Bad varint (length) at $offset");
-      offset += lenVar.byteLength;
-      final payloadTotalLength = lenVar.value; // Includes PN field and AEAD tag
-
+      // Length field (payload including PN)
+      final lenField = readVarInt(mutable, offset)!;
+      offset += lenField.byteLength;
       pnOffset = offset;
-      print("Packet number offset: $pnOffset");
-      // Remove Header Protection (modifies mutableArray)
+
+      // Remove header protection → reveals PN
       pnLength = removeHeaderProtection(
-        array: mutableArray,
+        array: mutable,
         pnOffset: pnOffset,
         hpKey: readHp,
         isShort: false,
       );
 
-      // Decrypt details
       packetNumber = decodeAndExpandPacketNumber(
-        mutableArray,
+        mutable,
         pnOffset,
         pnLength,
         largestPn,
       );
-      print("Packet number length: $pnLength");
-      print("Packet number: $packetNumber");
+
       nonce = computeNonce(readIv, packetNumber);
-
       final payloadStart = pnOffset + pnLength;
-      final payloadLength = lenVar.value - pnLength;
+      final payloadEnd = payloadStart + (lenField.value - pnLength);
 
-      // final payloadEnd = payloadStart + payloadTotalLength;
-      final payloadEnd = payloadStart + payloadLength;
-
-      if (payloadEnd > mutableArray.length) {
-        throw Exception(
-          "Truncated long header packet (expected $payloadEnd bytes, got ${mutableArray.length})",
-        );
+      if (payloadEnd > mutable.length) {
+        print("❌ Payload bounds exceed array");
+        return null;
       }
 
-      final payload = mutableArray.sublist(payloadStart, payloadEnd);
-      if (payload.length < 16) {
-        throw Exception("Encrypted payload too short (min 16 for tag)");
-      }
+      final payload = mutable.sublist(payloadStart, payloadEnd);
+      if (payload.length < 16) return null;
 
-      // AEAD components
       ciphertext = payload.sublist(0, payload.length - 16);
       tag = payload.sublist(payload.length - 16);
-      // AAD: Everything from start up to and including the revealed Packet Number
-      aad = mutableArray.sublist(0, pnOffset + pnLength);
+      aad = mutable.sublist(0, pnOffset + pnLength);
     } else {
-      // ---------- Short Header Parsing ----------
+      // -----------------------------
+      // Short Header (1‑RTT)
+      // -----------------------------
+      final dcid = session.dcid;
+      pnOffset = 1 + dcid.length;
 
-      keyPhase = (firstByte & 0x04) != 0; // Key Phase is the 3rd bit (0x04)
-
-      final dcidLen = dcid.length;
-      pnOffset = 1 + dcidLen; // PN starts after 1 byte Type and DCID
-
-      if (pnOffset + 4 > mutableArray.length) {
-        throw Exception("Short header too short for max PN length");
-      }
-
-      // Remove Header Protection (modifies mutableArray)
       pnLength = removeHeaderProtection(
-        array: mutableArray,
+        array: mutable,
         pnOffset: pnOffset,
         hpKey: readHp,
         isShort: true,
       );
 
-      // Decrypt details
       packetNumber = decodeAndExpandPacketNumber(
-        mutableArray,
+        mutable,
         pnOffset,
         pnLength,
         largestPn,
       );
+
       nonce = computeNonce(readIv, packetNumber);
 
       final payloadStart = pnOffset + pnLength;
-      final payload = mutableArray.sublist(payloadStart);
-      if (payload.length < 16) {
-        throw Exception("Encrypted payload too short (min 16 for tag)");
-      }
+      final payload = mutable.sublist(payloadStart);
+      if (payload.length < 16) return null;
 
-      // AEAD components
       ciphertext = payload.sublist(0, payload.length - 16);
       tag = payload.sublist(payload.length - 16);
-      // AAD: Everything from start up to and including the revealed Packet Number
-      aad = mutableArray.sublist(0, pnOffset + pnLength);
+      aad = mutable.sublist(0, pnOffset + pnLength);
     }
   } catch (e, st) {
-    // Catch header parsing or PN/Header Protection errors
-    print("QUIC Packet Header parsing/unprotect failed: $e");
+    print("❌ Header parsing failed: $e");
     print(st);
     return null;
   }
 
+  // -------------------------------------------------------------
+  // ✅ Attempt AEAD decryption
+  // -------------------------------------------------------------
   print("Decrypting cipher text ...");
-  // Final AEAD Decryption
-  // plaintext will be null if the decryption fails (e.g., failed tag authentication)
   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce!, aad);
-  print('✅ **Payload decrypted successfully!**');
-  print(
-    '✅ **Recovered Message (Hex): "${HEX.encode(plaintext!.sublist(0, 32))}"...',
-  );
-  // Return the result object
+
+  if (plaintext == null) {
+    print("❌ AEAD decryption failed (wrong keys or corrupted data)");
+    return null;
+  }
+
+  print("✅ Payload decrypted successfully!");
+  print("✅ Hex[0:32]: ${HEX.encode(plaintext.sublist(0, 32))}");
+
   return QuicDecryptedPacket(
     packetNumber: packetNumber!,
-    keyPhase: keyPhase,
+    keyPhase: false, // TODO when 1‑RTT KP implemented
     plaintext: plaintext,
   );
 }
@@ -372,6 +597,15 @@ Uint8List? encryptQuicPacket(
   Uint8List scid,
   Uint8List? token,
 ) {
+  // ✅ Log keys used for decrypt
+  print('--- decryptQuicPacket keys ---');
+  print('READ.key = ${HEX.encode(writeKey)}');
+  print('READ.iv  = ${HEX.encode(writeIv)}');
+  print('READ.hp  = ${HEX.encode(writeHp)}');
+  print('dcid     = ${HEX.encode(dcid)}');
+  print('pkt[0]   = 0x${encodedFrames[0].toRadixString(16).padLeft(2, '0')}');
+  print('pkt.len  = ${encodedFrames.length}');
+
   // 1. Determine Packet Number Length
   int pnLength;
   if (packetNumber <= 0xff) {
@@ -485,105 +719,105 @@ Uint8List? encryptQuicPacket(
 
 // main function with corrected DCID and SCID inputs:
 
-void main() {
-  final readKey = Uint8List.fromList(
-    HEX.decode("b14b918124fda5c8d79847602fa3520b"),
-  );
-  final readIv = Uint8List.fromList(HEX.decode("ddbc15dea80925a55686a7df"));
+// void main() {
+//   final readKey = Uint8List.fromList(
+//     HEX.decode("b14b918124fda5c8d79847602fa3520b"),
+//   );
+//   final readIv = Uint8List.fromList(HEX.decode("ddbc15dea80925a55686a7df"));
 
-  final readHp = Uint8List.fromList(
-    HEX.decode("6df4e9d737cdf714711d7c617ee82981"),
-  );
+//   final readHp = Uint8List.fromList(
+//     HEX.decode("6df4e9d737cdf714711d7c617ee82981"),
+//   );
 
-  // FIX: DCID is 8 bytes, matching the Expected packet's header (0x08 length field).
-  // The first byte of the original input array (0x08) was likely a mistake in the definition.
-  final dcid = Uint8List.fromList([
-    0x00, // Starts at 0x00 to match Expected hex: ...08(DCID Len) 0001020304050607
-    0x01,
-    0x02,
-    0x03,
-    0x04,
-    0x05,
-    0x06,
-    0x07,
-  ]);
+//   // FIX: DCID is 8 bytes, matching the Expected packet's header (0x08 length field).
+//   // The first byte of the original input array (0x08) was likely a mistake in the definition.
+//   final dcid = Uint8List.fromList([
+//     0x00, // Starts at 0x00 to match Expected hex: ...08(DCID Len) 0001020304050607
+//     0x01,
+//     0x02,
+//     0x03,
+//     0x04,
+//     0x05,
+//     0x06,
+//     0x07,
+//   ]);
 
-  final largestPn = 0;
+//   final largestPn = 0;
 
-  decryptQuicPacket(
-    quickPacket,
-    readKey,
-    readIv,
-    readHp,
-    dcid, // Required for Short Header parsing
-    largestPn, // Largest packet number received so far
-  );
+//   decryptQuicPacket(
+//     quickPacket,
+//     readKey,
+//     readIv,
+//     readHp,
+//     dcid, // Required for Short Header parsing
+//     largestPn, // Largest packet number received so far
+//   );
 
-  // FIX: SCID is 5 bytes, matching the Expected packet's header (0x05 length field).
-  final scid = Uint8List.fromList([
-    0x63, // Starts at 0x63 to match Expected hex: ...05(SCID Len) 635f636964
-    0x5f,
-    0x63,
-    0x69,
-    0x64,
-  ]);
+//   // FIX: SCID is 5 bytes, matching the Expected packet's header (0x05 length field).
+//   final scid = Uint8List.fromList([
+//     0x63, // Starts at 0x63 to match Expected hex: ...05(SCID Len) 635f636964
+//     0x5f,
+//     0x63,
+//     0x69,
+//     0x64,
+//   ]);
 
-  // Assuming `decryptedBytes` is correctly set after decryption and holds 242 bytes of payload.
-  final encrypted = encryptQuicPacket(
-    "initial",
-    decryptedBytes,
-    readKey,
-    readIv,
-    readHp,
-    0,
-    dcid,
-    scid,
-    null,
-  );
-  print("Get encrypted packet: ${HEX.encode(encrypted!)}");
+//   // Assuming `decryptedBytes` is correctly set after decryption and holds 242 bytes of payload.
+//   final encrypted = encryptQuicPacket(
+//     "initial",
+//     decryptedBytes,
+//     readKey,
+//     readIv,
+//     readHp,
+//     0,
+//     dcid,
+//     scid,
+//     null,
+//   );
+//   print("Get encrypted packet: ${HEX.encode(encrypted!)}");
 
-  print("Expected:             ${HEX.encode(quickPacket)}");
+//   print("Expected:             ${HEX.encode(quickPacket)}");
 
-  final ver = Version.version1;
+//   final ver = Version.version1;
 
-  // final cid = dcid;
-  // final (clientSealer, clientOpener) = newInitialAEAD(
-  //   cid,
-  //   Perspective.client,
-  //   ver,
-  // );
+//   // final cid = dcid;
+//   // final (clientSealer, clientOpener) = newInitialAEAD(
+//   //   cid,
+//   //   Perspective.client,
+//   //   ver,
+//   // );
 
-  // final (serverSealer, serverOpener) = newInitialAEAD(
-  //   cid,
-  //   Perspective.server,
-  //   ver,
-  // );
-  // print("Client sealer");
-  // print("Write Key: ${clientSealer.aead.key}");
-  // print("Expected   $readKey");
-  // print("");
+//   // final (serverSealer, serverOpener) = newInitialAEAD(
+//   //   cid,
+//   //   Perspective.server,
+//   //   ver,
+//   // );
+//   // print("Client sealer");
+//   // print("Write Key: ${clientSealer.aead.key}");
+//   // print("Expected   $readKey");
+//   // print("");
 
-  // print("Write IV: ${clientSealer.aead.nonceMask}");
-  // print("Expected  $readIv");
-  // print("");
+//   // print("Write IV: ${clientSealer.aead.nonceMask}");
+//   // print("Expected  $readIv");
+//   // print("");
 
-  // print("Header Protection Key: ${clientSealer.hp}");
-  // print("Expected               $readHp");
-  // print("");
+//   // print("Header Protection Key: ${clientSealer.hp}");
+//   // print("Expected               $readHp");
+//   // print("");
 
-  // print("Server opener");
-  // print("Write Key: ${serverOpener.aead.key}");
-  // print("Expected   $readKey");
-  // print("");
+//   // print("Server opener");
+//   // print("Write Key: ${serverOpener.aead.key}");
+//   // print("Expected   $readKey");
+//   // print("");
 
-  // print("Write IV: ${serverOpener.aead.nonceMask}");
-  // print("Expected  $readIv");
-  // print("");
+//   // print("Write IV: ${serverOpener.aead.nonceMask}");
+//   // print("Expected  $readIv");
+//   // print("");
 
-  // print("Header Protection Key: ${serverOpener.hp}");
-  // print("Expected               $readHp");
-  // print("");
-}
+//   // print("Header Protection Key: ${serverOpener.hp}");
+//   // print("Expected               $readHp");
+//   // print("");
+// }
 
 final quickPacket = Uint8List.fromList([
   0xcd,

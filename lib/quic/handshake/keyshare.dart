@@ -2,12 +2,19 @@ import 'dart:typed_data';
 
 import '../byte_reader.dart';
 import 'client_hello.dart';
+import 'tls_messages.dart';
 
 class ParsedKeyShare {
   final int group;
   final Uint8List pub;
 
   ParsedKeyShare(this.group, this.pub);
+
+  @override
+  String toString() {
+    // TODO: implement toString
+    return "Keyshare{ groutp:${supportedGroupsMap[group] != null ? (supportedGroupsMap[group]) : group}}";
+  }
 }
 
 /// QUIC ClientHello KeyShare parser (RFC 9001)
