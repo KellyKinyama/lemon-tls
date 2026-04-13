@@ -12,6 +12,7 @@ class ServerHello extends TlsHandshakeMessage {
   final Uint8List sessionId;
   final int cipherSuite;
   final int compressionMethod;
+  final Uint8List? rawBytes;
 
   // Parsed extensions
   final int? selectedVersion; // from supported_versions
@@ -28,6 +29,7 @@ class ServerHello extends TlsHandshakeMessage {
     required int msgType, // ALWAYS 0x02
     this.keyShareEntry,
     this.selectedVersion,
+    this.rawBytes,
   }) : super(msgType);
 
   // ============================================================
@@ -93,6 +95,7 @@ class ServerHello extends TlsHandshakeMessage {
       keyShareEntry: keyShare,
       selectedVersion: version,
       msgType: 0x02,
+      rawBytes: buf.data.sublist(0, buf.readOffset),
     );
   }
 

@@ -243,6 +243,10 @@ class QuicClient {
     final ch = myQuicSession!.buildInitialClientHello("localhost");
     final tlsPayload = ch.build_tls_client_hello2();
 
+    // ✅ REQUIRED for handshake transcript
+    myQuicSession!.clientHello = ch;
+    myQuicSession!.clientHelloRaw = tlsPayload;
+
     // 2) Wrap TLS payload into a QUIC CRYPTO frame
     // Frame: 0x06 | Offset(varint) | Length(varint) | Data
     final cryptoFrame = QuicBuffer()

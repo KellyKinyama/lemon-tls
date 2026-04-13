@@ -249,41 +249,31 @@ QuicDecryptedPacket? decryptQuicPacket(
   }
 
   // -------------------------------------------------------------
-  // ✅ Select read keys depending on encryption level
+  // ✅ Select read keys
   // -------------------------------------------------------------
   Uint8List readKey, readIv, readHp;
 
   if (isInitial) {
-    if (session.initialRead == null) {
-      print("❌ No Initial read keys installed");
-      return null;
-    }
+    if (session.initialRead == null) return null;
     readKey = session.initialRead!.key;
     readIv = session.initialRead!.iv;
     readHp = session.initialRead!.hp;
   } else if (isHandshake) {
-    if (session.handshakeRead == null) {
-      print("❌ No Handshake read keys installed");
-      return null;
-    }
+    if (session.handshakeRead == null) return null;
     readKey = session.handshakeRead!.key;
     readIv = session.handshakeRead!.iv;
     readHp = session.handshakeRead!.hp;
   } else if (isOneRtt) {
-    if (session.oneRttRead == null) {
-      print("❌ No 1‑RTT read keys installed");
-      return null;
-    }
+    if (session.oneRttRead == null) return null;
     readKey = session.oneRttRead!.key;
     readIv = session.oneRttRead!.iv;
     readHp = session.oneRttRead!.hp;
   } else {
-    print("❌ Unsupported QUIC packet type");
     return null;
   }
 
   // -------------------------------------------------------------
-  // ✅ Debug key output
+  // ✅ Debug output
   // -------------------------------------------------------------
   print('--- decryptQuicPacket keys ---');
   print(
@@ -303,7 +293,7 @@ QuicDecryptedPacket? decryptQuicPacket(
   print('pkt.len    = ${array.length}');
 
   // -------------------------------------------------------------
-  // ✅ Begin header parsing
+  // ✅ Header parsing
   // -------------------------------------------------------------
   int pnOffset = 0;
   int pnLength = 0;
@@ -313,16 +303,12 @@ QuicDecryptedPacket? decryptQuicPacket(
 
   try {
     if (isLong) {
-      // -----------------------------
-      // Long Header
-      // -----------------------------
-      int offset = 1; // skip flags
+      int offset = 1; // flags
+      offset += 4; // version
 
-      // version
-      offset += 4;
-
-      // DCID
+      // ✅ DCID (CAPTURE IT)
       final dcidLen = mutable[offset++];
+      final packetDcid = mutable.sublist(offset, offset + dcidLen);
       offset += dcidLen;
 
       // SCID
@@ -336,12 +322,12 @@ QuicDecryptedPacket? decryptQuicPacket(
         offset += t.byteLength + t.value;
       }
 
-      // Length field (payload including PN)
+      // Length
       final lenField = readVarInt(mutable, offset)!;
       offset += lenField.byteLength;
       pnOffset = offset;
 
-      // Remove header protection → reveals PN
+      // Header protection
       pnLength = removeHeaderProtection(
         array: mutable,
         pnOffset: pnOffset,
@@ -357,19 +343,18 @@ QuicDecryptedPacket? decryptQuicPacket(
       );
 
       nonce = computeNonce(readIv, packetNumber);
+
       final payloadStart = pnOffset + pnLength;
       final payloadEnd = payloadStart + (lenField.value - pnLength);
-
-      if (payloadEnd > mutable.length) {
-        print("❌ Payload bounds exceed array");
-        return null;
-      }
+      if (payloadEnd > mutable.length) return null;
 
       final payload = mutable.sublist(payloadStart, payloadEnd);
       if (payload.length < 16) return null;
 
       ciphertext = payload.sublist(0, payload.length - 16);
       tag = payload.sublist(payload.length - 16);
+
+      // ✅ AAD = header INCLUDING *packet DCID*
       aad = mutable.sublist(0, pnOffset + pnLength);
     } else {
       // -----------------------------
@@ -402,29 +387,19 @@ QuicDecryptedPacket? decryptQuicPacket(
       tag = payload.sublist(payload.length - 16);
       aad = mutable.sublist(0, pnOffset + pnLength);
     }
-  } catch (e, st) {
-    print("❌ Header parsing failed: $e");
-    print(st);
+  } catch (_) {
     return null;
   }
 
   // -------------------------------------------------------------
-  // ✅ Attempt AEAD decryption
+  // ✅ AEAD decrypt
   // -------------------------------------------------------------
-  print("Decrypting cipher text ...");
   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce!, aad);
-
-  if (plaintext == null) {
-    print("❌ AEAD decryption failed (wrong keys or corrupted data)");
-    return null;
-  }
-
-  print("✅ Payload decrypted successfully!");
-  print("✅ Hex[0:32]: ${HEX.encode(plaintext.sublist(0, 32))}");
+  if (plaintext == null) return null;
 
   return QuicDecryptedPacket(
     packetNumber: packetNumber!,
-    keyPhase: false, // TODO when 1‑RTT KP implemented
+    keyPhase: false,
     plaintext: plaintext,
   );
 }

@@ -6,19 +6,19 @@ import 'tls_session7.dart';
 // import 'tls_session.dart';
 
 void main() async {
-  // final session = TLS13Session(
-  //   host: Uint8List.fromList(utf8.encode('example.com')),
-  //   // host: utf8.encode("localhost"),
-  //   // port: 8443,
-  //   port: 443,
-  // );
-
   final session = TLS13Session(
-    // host: Uint8List.fromList(utf8.encode('example.com')),
-    host: utf8.encode("localhost"),
-    port: 8443,
-    // port: 443,
+    host: Uint8List.fromList(utf8.encode('example.com')),
+    // host: utf8.encode("localhost"),
+    // port: 8443,
+    port: 443,
   );
+
+  // final session = TLS13Session(
+  //   // host: Uint8List.fromList(utf8.encode('example.com')),
+  //   host: utf8.encode("localhost"),
+  //   port: 8443,
+  //   // port: 443,
+  // );
 
   await session.connect();
 

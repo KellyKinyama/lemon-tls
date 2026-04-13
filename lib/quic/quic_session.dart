@@ -1,10 +1,14 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:hex/hex.dart';
+import 'package:lemon_tls/quic/hkdf.dart';
+import 'package:lemon_tls/tls2/crypto_hash.dart';
 import 'package:x25519/x25519.dart';
 
 import 'buffer.dart';
+import 'cipher/p256.dart';
 import 'crypto.dart';
 import 'frames/quic_frames.dart';
 import 'handshake/certificate.dart';
@@ -17,8 +21,26 @@ import 'handshake/tls_messages.dart';
 import 'packet/payload_parser2.dart';
 import 'quic_keys.dart';
 
-import 'package:elliptic/elliptic.dart';
-import 'package:elliptic/ecdh.dart';
+Uint8List quicHkdfExpandLabel({
+  required Uint8List secret,
+  required String label,
+  required int length,
+}) {
+  final labelBytes = utf8.encode(label);
+
+  final hkdfLabel = BytesBuilder()
+    ..addByte(length >> 8)
+    ..addByte(length & 0xff)
+    ..addByte(labelBytes.length)
+    ..add(labelBytes)
+    ..addByte(0); // empty context
+
+  return hkdfExpand(
+    prk: secret,
+    info: hkdfLabel.toBytes(),
+    outputLength: length,
+  );
+}
 
 class QUICSession {
   final Uint8List dcid;
@@ -206,32 +228,127 @@ class QUICSession {
   }
 
   void onServerHello(ServerHello sh) {
-  print("🔧 QUICSession.onServerHello(): Received ServerHello");
+    print("🔧 QUICSession.onServerHello(): deriving handshake secrets");
 
-  // TODO: derive handshake keys here
-  if (handshakeRead == null) {
-    print("❌ No Handshake read keys installed");
-  } else {
-    print("✅ Handshake keys installed, ready for Handshake packets");
+    if (clientHelloRaw == null) {
+      throw StateError("ClientHello raw bytes missing");
+    }
+
+    final ks = sh.keyShareEntry!;
+    Uint8List sharedSecret;
+
+    // ============================================================
+    // 1) ECDHE
+    // ============================================================
+    if (ks.group == 0x001d) {
+      sharedSecret = X25519(x25519.privateKey, ks.pub);
+    } else if (ks.group == 0x0017) {
+      sharedSecret = generateP256SharedSecret(ks.pub, p256Priv);
+    } else {
+      throw StateError("Unsupported key_share group");
+    }
+
+    // ============================================================
+    // 2) Transcript hash
+    // ============================================================
+    final transcriptHash = createHash(
+      Uint8List.fromList([...clientHelloRaw!, ...sh.rawBytes!]),
+    );
+
+    // ============================================================
+    // 3) TLS 1.3 secret chain (THIS WAS MISSING)
+    // ============================================================
+
+    // early_secret = HKDF-Extract(0, 0)
+    final zero = Uint8List(32);
+    final earlySecret = hkdfExtract(zero, salt: zero);
+
+    // derived_secret = HKDF-Expand-Label(early_secret, "derived", "", HashLen)
+    final derivedSecret = hkdfExpandLabel(
+      secret: earlySecret,
+      label: "derived",
+      context: Uint8List(0),
+      length: 32,
+    );
+
+    // handshake_secret = HKDF-Extract(derived_secret, shared_secret)
+    final handshakeSecret = hkdfExtract(sharedSecret, salt: derivedSecret);
+
+    // ============================================================
+    // 4) Handshake traffic secrets
+    // ============================================================
+    final clientHsTraffic = hkdfExpandLabel(
+      secret: handshakeSecret,
+      label: "c hs traffic",
+      context: transcriptHash,
+      length: 32,
+    );
+
+    final serverHsTraffic = hkdfExpandLabel(
+      secret: handshakeSecret,
+      label: "s hs traffic",
+      context: transcriptHash,
+      length: 32,
+    );
+
+    // ============================================================
+    // 5) QUIC handshake packet keys (TLS HKDF‑Expand‑Label)
+    // ============================================================
+    Uint8List qKey(Uint8List s) => hkdfExpandLabel(
+      secret: s,
+      label: "quic key",
+      context: Uint8List(0),
+      length: 16,
+    );
+
+    Uint8List qIv(Uint8List s) => hkdfExpandLabel(
+      secret: s,
+      label: "quic iv",
+      context: Uint8List(0),
+      length: 12,
+    );
+
+    Uint8List qHp(Uint8List s) => hkdfExpandLabel(
+      secret: s,
+      label: "quic hp",
+      context: Uint8List(0),
+      length: 16,
+    );
+
+    // ============================================================
+    // 6) Install keys (direction matters)
+    // ============================================================
+    handshakeRead = HandshakeKeys(
+      key: qKey(serverHsTraffic), // server → client
+      iv: qIv(serverHsTraffic),
+      hp: qHp(serverHsTraffic),
+    );
+
+    handshakeWrite = HandshakeKeys(
+      key: qKey(clientHsTraffic), // client → server
+      iv: qIv(clientHsTraffic),
+      hp: qHp(clientHsTraffic),
+    );
+
+    print("✅ Handshake keys installed (TLS‑correct)");
   }
-}
 
-void onEncryptedExtensions(EncryptedExtensions ee) {
-  print("🔧 QUICSession.onEncryptedExtensions()");
-}
+  void onEncryptedExtensions(EncryptedExtensions ee) {
+    print("🔧 QUICSession.onEncryptedExtensions()");
+  }
 
-void onCertificate(CertificateMessage cert) {
-  print("🔧 QUICSession.onCertificate()");
-}
+  void onCertificate(CertificateMessage cert) {
+    print("🔧 QUICSession.onCertificate()");
+  }
 
-void onCertificateVerify(CertificateVerify cv) {
-  print("🔧 QUICSession.onCertificateVerify()");
-}
+  void onCertificateVerify(CertificateVerify cv) {
+    print("🔧 QUICSession.onCertificateVerify()");
+  }
 
-void onFinished(FinishedMessage fin) {
-  print("🔧 QUICSession.onFinished()");
-  // TODO: install 1‑RTT keys
-}
+  void onFinished(FinishedMessage fin) {
+    print("🔧 QUICSession.onFinished()");
+    // TODO: install 1‑RTT keys
+  }
 
   // Mock method to simulate processing decrypted frames
   // void handleDecryptedPacket(Uint8List plaintext) {
@@ -244,80 +361,94 @@ void onFinished(FinishedMessage fin) {
   // }
 
   void handleDecryptedPacket(Uint8List plaintext) {
-  print('Session ${HEX.encode(dcid)} received ${plaintext.length} bytes of plaintext.');
+    print(
+      'Session ${HEX.encode(dcid)} received ${plaintext.length} bytes of plaintext.',
+    );
 
-  // -----------------------------
-  // 1. Parse QUIC payload (frames)
-  // -----------------------------
-  final (frames, _, :largest, :firstRange, :delay, :type) =
-      parsePayload(plaintext, this) as (
-        List<QuicFrame>,
-        Object?,
-        {int? largest, int? firstRange, int? delay, String? type}
-      );
+    // -----------------------------
+    // 1. Parse QUIC payload (frames)
+    // -----------------------------
+    final parsedPayload = parsePayload(plaintext, this);
 
-  for (final frame in frames) {
-    if (frame is CryptoFrame) {
-      print("📦 Received CRYPTO frame: offset=${frame.offset}, len=${frame.data.length}");
+    for (final frame in parsedPayload.frames) {
+      if (frame is CryptoFrame) {
+        print(
+          "📦 Received CRYPTO frame: offset=${frame.offset}, len=${frame.data.length}",
+        );
 
-      // ---------------------------------------
-      // 2. Parse TLS handshake messages inside CRYPTO frame
-      // ---------------------------------------
-      final tlsMessages = parseTlsMessages(frame.data);
+        // ---------------------------------------
+        // 2. Parse TLS handshake messages inside CRYPTO frame
+        // ---------------------------------------
+        final tlsMessages = parseTlsMessages(frame.data);
 
-      // Append raw frame data to transcript for key schedule later
-      transcript.add(frame.data);
+        // Append raw frame data to transcript for key schedule later
+        transcript.add(frame.data);
 
-      // ---------------------------------------
-      // 3. Process each TLS handshake message
-      // ---------------------------------------
-      for (final msg in tlsMessages) {
+        // ---------------------------------------
+        // 3. Process each TLS handshake message
+        // ---------------------------------------
+        for (final msg in tlsMessages) {
+          // ---------------------------
+          // ✅ ServerHello
+          // ---------------------------
+          if (msg is ServerHello) {
+            print("🔑 Handling ServerHello…");
 
-        // ---------------------------
-        // ✅ ServerHello
-        // ---------------------------
-        if (msg is ServerHello) {
-          print("🔑 Handling ServerHello…");
+            // Save server random and keyshare info
+            // (Optional but useful)
+            serverRandom = msg.random;
 
-          // Save server random and keyshare info
-          // (Optional but useful)
-          serverRandom = msg.random;
+            // This will later derive handshake keys
+            onServerHello(msg);
+          }
 
-          // This will later derive handshake keys
-          _onServerHello(msg);
-        }
+          // ---------------------------
+          // ✅ EncryptedExtensions
+          // ---------------------------
+          if (msg is EncryptedExtensions) {
+            print("✅ Received EncryptedExtensions");
+            // nothing to derive yet
+          }
 
-        // ---------------------------
-        // ✅ EncryptedExtensions
-        // ---------------------------
-        if (msg is EncryptedExtensions) {
-          print("✅ Received EncryptedExtensions");
-          // nothing to derive yet
-        }
+          // ---------------------------
+          // ✅ Certificate
+          // ---------------------------
+          if (msg is CertificateMessage) {
+            print("✅ Received Certificate (${msg.certificates.length} certs)");
+          }
 
-        // ---------------------------
-        // ✅ Certificate
-        // ---------------------------
-        if (msg is CertificateMessage) {
-          print("✅ Received Certificate (${msg.certificates.length} certs)");
-        }
+          // ---------------------------
+          // ✅ CertificateVerify
+          // ---------------------------
+          if (msg is CertificateVerify) {
+            print("✅ Received CertificateVerify");
+          }
 
-        // ---------------------------
-        // ✅ CertificateVerify
-        // ---------------------------
-        if (msg is CertificateVerify) {
-          print("✅ Received CertificateVerify");
-        }
-
-        // ---------------------------
-        // ✅ Finished
-        // ---------------------------
-        if (msg is FinishedMessage) {
-          print("✅ Received Finished – ready for 1‑RTT key derivation");
-          _onServerFinished(msg);
+          // ---------------------------
+          // ✅ Finished
+          // ---------------------------
+          if (msg is FinishedMessage) {
+            print("✅ Received Finished – ready for 1‑RTT key derivation");
+            onFinished(msg);
+          }
         }
       }
     }
   }
+
+  // =============================================================
+  // TLS 1.3 → QUIC handshake secret derivation
+  // =============================================================
+
+  // =============================================================
+  // Handshake helpers
+  // =============================================================
 }
-}
+
+
+
+  // -------------------------------------------------
+  // P‑256 (uses keys already generated in constructor)
+  // -------------------------------------------------
+
+

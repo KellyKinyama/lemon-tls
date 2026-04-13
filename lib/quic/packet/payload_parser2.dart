@@ -2,33 +2,38 @@ import 'dart:typed_data';
 
 import '../buffer.dart';
 import '../frames/quic_frames.dart';
-import '../handshake/certificate.dart';
-import '../handshake/client_hello.dart';
-import '../handshake/encrypted_extensions.dart';
-import '../handshake/finished.dart';
-import '../handshake/server_hello.dart';
-import '../handshake/tls_messages.dart';
 import '../quic_session.dart';
 
-/// Returns a tuple: (frames, ackInfo, metadata)
-(dynamic, dynamic, {int? largest, int? firstRange, int? delay, String? type})
-parsePayload(Uint8List plaintextPayload, QUICSession session) {
-  print('--- Parsing Decrypted QUIC Payload ---');
-  final buffer = QuicBuffer(data: plaintextPayload);
+/// =============================================================
+/// Parsed QUIC payload result
+/// =============================================================
+class ParsedQuicPayload {
+  final List<QuicFrame> frames;
+  final AckFrame? ack;
 
-  final frames = <dynamic>[]; // ← the FIX: collect frames here
-  dynamic ackInfo;
-  int? largestPn;
-  int? firstRange;
-  int? delayField;
+  ParsedQuicPayload({required this.frames, this.ack});
+}
+
+/// =============================================================
+/// Parse decrypted QUIC payload into frames
+/// =============================================================
+ParsedQuicPayload parsePayload(
+  Uint8List plaintextPayload,
+  QUICSession session,
+) {
+  print('--- Parsing Decrypted QUIC Payload ---');
+
+  final buffer = QuicBuffer(data: plaintextPayload);
+  final frames = <QuicFrame>[];
+  AckFrame? ackFrame;
 
   try {
     while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
       final frameType = buffer.pullVarInt();
 
-      // ---------------------------------------------------------
-      // ✅ CRYPTO FRAME
-      // ---------------------------------------------------------
+      // =========================================================
+      // ✅ CRYPTO frame (0x06)
+      // =========================================================
       if (frameType == 0x06) {
         final offset = buffer.pullVarInt();
         final length = buffer.pullVarInt();
@@ -38,17 +43,18 @@ parsePayload(Uint8List plaintextPayload, QUICSession session) {
 
         frames.add(CryptoFrame(offset: offset, data: cryptoData));
       }
-      // ---------------------------------------------------------
-      // ✅ ACK FRAME
-      // ---------------------------------------------------------
+      // =========================================================
+      // ✅ ACK frame (0x02)
+      // =========================================================
       else if (frameType == 0x02) {
         final hasECN = (frameType & 0x01) == 0x01;
-        largestPn = buffer.pullVarInt();
-        delayField = buffer.pullVarInt();
-        final rangeCount = buffer.pullVarInt();
-        firstRange = buffer.pullVarInt();
 
-        final ranges = [];
+        final largest = buffer.pullVarInt();
+        final delay = buffer.pullVarInt();
+        final rangeCount = buffer.pullVarInt();
+        final firstRange = buffer.pullVarInt();
+
+        final ranges = <dynamic>[];
         for (int i = 0; i < rangeCount; i++) {
           final gap = buffer.pullVarInt();
           final len = buffer.pullVarInt();
@@ -63,37 +69,29 @@ parsePayload(Uint8List plaintextPayload, QUICSession session) {
           ecn = {ect0: ect0, ect1: ect1, ce: ce};
         }
 
-        ackInfo = (
-          type: 'ack',
-          largest: largestPn,
-          delay: delayField,
+        ackFrame = AckFrame(
+          largest: largest,
+          delay: delay,
           firstRange: firstRange,
           ranges: ranges,
           ecn: ecn,
         );
 
-        print(ackInfo);
-        frames.add(ackInfo);
+        print(ackFrame);
+        frames.add(ackFrame);
       }
-      // ---------------------------------------------------------
-      // ✅ SKIP FRAME
-      // ---------------------------------------------------------
+      // =========================================================
+      // ✅ Skip unknown frames
+      // =========================================================
       else {
         print('ℹ️ Skipping frame type 0x${frameType.toRadixString(16)}');
       }
     }
   } catch (e, st) {
-    print('\n🛑 Error during payload parsing: $e,\nStack trace: $st');
+    print('\n🛑 Error during payload parsing: $e\n$st');
   }
 
   print('\n🎉 Payload parsing complete.');
 
-  return (
-    frames,
-    ackInfo,
-    largest: largestPn,
-    firstRange: firstRange,
-    delay: delayField,
-    type: ackInfo == null ? null : 'ack',
-  );
+  return ParsedQuicPayload(frames: frames, ack: ackFrame);
 }
