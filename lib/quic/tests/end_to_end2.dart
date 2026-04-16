@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
+import 'dart:io';
 import 'package:hex/hex.dart';
 
 import '../packet/quic_packet.dart';
@@ -9,10 +10,15 @@ import 'test.dart';
 
 final _bytesEq = const ListEquality<int>();
 
+void log(String msg) {
+  print(msg);
+  File('test_log.txt').writeAsStringSync('$msg\n', mode: FileMode.append);
+}
+
 void expectBytesEqual(String name, Uint8List actual, String expectedHex) {
   final expected = Uint8List.fromList(HEX.decode(expectedHex));
-  print("Got $name:      ${HEX.encode(actual)}");
-  print("Expected $name: $expectedHex");
+  log("Got $name:      ${HEX.encode(actual)}");
+  log("Expected $name: $expectedHex");
 
   if (!_bytesEq.equals(actual, expected)) {
     throw StateError(
@@ -97,6 +103,7 @@ class QuicSession {
   // ---- Connection IDs ----
   final serverCid = Uint8List.fromList(HEX.decode("0001020304050607"));
   final clientCid = Uint8List.fromList(HEX.decode("635f636964")); // "c_cid"
+  final s_cid = Uint8List.fromList(HEX.decode("735f636964")); // "s_cid"
 
   QuicSession(this.role);
 
@@ -120,7 +127,7 @@ class QuicSession {
 
     final pnSpace = _pnSpaces[level]!;
 
-    final dcid = level == EncryptionLevel.application ? peerCid : Uint8List(0);
+    final dcid = level == EncryptionLevel.application ? myCid : Uint8List(0);
 
     final result = decryptQuicPacketBytes2(
       packet,
@@ -158,7 +165,9 @@ class QuicSession {
   }
 
   Uint8List buildServerInitial() {
-    final frames = buildCryptoFrame(serverHello);
+    final cryptoFrame = buildCryptoFrame(serverHello);
+    final ackFrame = Uint8List.fromList([0x02, 0x00, 0x42, 0x40, 0x00, 0x00]);
+    final frames = concatUint8Lists([ackFrame, cryptoFrame]);
 
     final encrypted = encryptQuicPacket(
       'initial',
@@ -167,8 +176,8 @@ class QuicSession {
       serverInitialIv,
       serverInitialHp,
       0,
-      serverCid,
       clientCid,
+      s_cid,
       Uint8List(0),
     )!;
 
@@ -191,8 +200,8 @@ Uint8List buildCryptoFrame(Uint8List cryptoData) {
 void testEndToEnd() {
   final client = QuicSession(QuicRole.client);
 
-  client.myCid = Uint8List.fromList(HEX.decode("735f636964")); // s_cid
-  client.peerCid = Uint8List.fromList(HEX.decode("635f636964")); // c_cid
+  client.myCid = client.clientCid; // c_cid
+  client.peerCid = client.serverCid; // 00..07
 
   // ✅ SERVER → CLIENT Initial traffic
   client.setReadKeys(
@@ -225,8 +234,8 @@ void testEndToEnd() {
 
   final server = QuicSession(QuicRole.server);
 
-  server.myCid = Uint8List.fromList(HEX.decode("635f636964")); // c_cid
-  server.peerCid = Uint8List.fromList(HEX.decode("735f636964")); // s_cid
+  server.myCid = server.s_cid; // s_cid
+  server.peerCid = server.clientCid; // c_cid
 
   // ✅ CLIENT → SERVER Initial traffic
   server.setReadKeys(
@@ -293,5 +302,11 @@ void testEndToEnd() {
 }
 
 void main() {
-  testEndToEnd();
+  if (File('test_log.txt').existsSync()) File('test_log.txt').deleteSync();
+  try {
+    testEndToEnd();
+  } catch (e, s) {
+    log("Caught error: $e");
+    log(s.toString());
+  }
 }
