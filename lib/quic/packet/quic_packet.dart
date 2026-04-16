@@ -728,7 +728,7 @@ Uint8List? encryptQuicPacket(
   Uint8List? token,
 ) {
   // ✅ Log keys used for decrypt
-  print('--- decryptQuicPacket keys ---');
+  print('--- encryptQuicPacket keys ---');
   print('READ.key = ${HEX.encode(writeKey)}');
   print('READ.iv  = ${HEX.encode(writeIv)}');
   print('READ.hp  = ${HEX.encode(writeHp)}');
