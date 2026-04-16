@@ -725,27 +725,22 @@ Uint8List? encryptQuicPacket(
   int packetNumber,
   Uint8List dcid,
   Uint8List scid,
-  Uint8List? token,
-) {
-  // ✅ Log keys used for decrypt
-  print('--- decryptQuicPacket keys ---');
-  print('READ.key = ${HEX.encode(writeKey)}');
-  print('READ.iv  = ${HEX.encode(writeIv)}');
-  print('READ.hp  = ${HEX.encode(writeHp)}');
-  print('dcid     = ${HEX.encode(dcid)}');
-  print('pkt[0]   = 0x${encodedFrames[0].toRadixString(16).padLeft(2, '0')}');
-  print('pkt.len  = ${encodedFrames.length}');
-
+  Uint8List? token, {
+  int? forcedPnLength,
+}) {
   // 1. Determine Packet Number Length
   int pnLength;
-  if (packetNumber <= 0xff) {
+  if (forcedPnLength != null) {
+    pnLength = forcedPnLength;
+  } else if (packetNumber <= 0xff) {
     pnLength = 1;
-  } else if (packetNumber <= 0xffff)
+  } else if (packetNumber <= 0xffff) {
     pnLength = 2;
-  else if (packetNumber <= 0xffffff)
+  } else if (packetNumber <= 0xffffff) {
     pnLength = 3;
-  else
+  } else {
     pnLength = 4;
+  }
 
   // 2. Truncate Packet Number field to pnLength bytes (Big Endian)
   final pnFull = ByteData(4);

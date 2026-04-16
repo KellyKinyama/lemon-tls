@@ -160,23 +160,23 @@ void testEndToEnd() {
       hp: Uint8List.fromList(HEX.decode("8a6a38bc5cc40cb482a254dac68c9d2f")),
     ),
   );
-
+  //client sends hello
+  server.decryptPacket(udp1ClientHello, EncryptionLevel.initial);
   client.decryptPacket(udp2ServerHello, EncryptionLevel.initial);
   client.decryptPacket(upd2HandshakePacket, EncryptionLevel.handshake);
   client.decryptPacket(udp3ServerHandshakeFinished, EncryptionLevel.handshake);
+  server.decryptPacket(udp4ClientinitialAck, EncryptionLevel.initial);
+  server.decryptPacket(udp5ClientHandshakeFinished, EncryptionLevel.handshake);
+
+  server.decryptPacket(udp5ClientPing, EncryptionLevel.application);
   client.decryptPacket(udp6ServerHandshakeAck, EncryptionLevel.handshake);
 
   client.decryptPacket(udp6ServerApp, EncryptionLevel.application);
-  client.decryptPacket(udp8ServerClose, EncryptionLevel.application);
-
-  server.decryptPacket(udp1ClientHello, EncryptionLevel.initial);
-  server.decryptPacket(udp4ClientinitialAck, EncryptionLevel.initial);
-  server.decryptPacket(udp5ClientHandshakeFinished, EncryptionLevel.handshake);
-  server.decryptPacket(udp5ClientPing, EncryptionLevel.application);
   server.decryptPacket(
     udp7ServerApp,
     EncryptionLevel.application,
   ); // client ACK
+  client.decryptPacket(udp8ServerClose, EncryptionLevel.application);
 }
 
 void main() {
