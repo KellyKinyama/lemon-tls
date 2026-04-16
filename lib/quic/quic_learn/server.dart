@@ -1,20 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
-Future<void> main(List<String> arguments) async {
-  print("args: $arguments");
-  int port;
-  try {
-    port = int.parse(arguments[0]);
-  } catch (e, st) {
-    print(e);
-    print(st);
-    port = 0;
-  }
-
+Future<void> main() async {
   final socket = await RawDatagramSocket.bind(
     "127.0.0.1",
     // int.parse(arguments[0]),
-    port,
+    4433,
   );
   print("listening ip:${socket.address.address}:${socket.port}");
 
@@ -23,9 +14,12 @@ Future<void> main(List<String> arguments) async {
       final dg = socket.receive();
       if (dg != null) {
         // _onPacket(dg);
-        print("Data datagram received: ${dg.data}");
+        print("Data datagram received: ${utf8.decode(dg.data)}");
         socket.send(dg.data, InternetAddress("127.0.0.1"), dg.port);
       }
     }
   });
+
+  await Future.delayed(Duration(minutes: 10));
+  socket.close();
 }
