@@ -5,6 +5,7 @@ import 'package:hex/hex.dart';
 import 'package:lemon_tls/quic/cipher/p256.dart';
 import 'package:lemon_tls/quic/hash.dart';
 import 'package:lemon_tls/quic/hkdf.dart';
+import 'package:lemon_tls/quic/packet/quic_packet.dart';
 import 'package:x25519/x25519.dart';
 
 import '../cipher/x25519.dart';
@@ -75,7 +76,8 @@ final udp6ServerApp = Uint8List.fromList(
 
 final udp7ServerApp = Uint8List.fromList(
   HEX.decode(
-    "5a 73 5f 63 69 64 c8 67 e0 b4 90 58 8b 44 b1 0d 7c d3 2b 03 e3 45 02 80 2f 25 a1 93",
+    "5a 73 5f 63 69 64 c8 67 e0 b4 90 58 8b 44 b1 0d 7c d3 2b 03 e3 45 02 80 2f 25 a1 93"
+        .replaceAll(" ", ""),
   ),
 );
 
@@ -84,79 +86,6 @@ final udp8ServerClose = Uint8List.fromList(
     "54 63 5f 63 69 64 95 18 c4 a5 ff eb 17 b6 7e c2 7f 97 e5 0d 27 1d c7 02 d9 2c ef b0 68 8b e9 fd 7b 30 2d 9e b4 7c df 1f c4 cd 9a ac",
   ),
 );
-
-// final randomData = Uint8List.fromList(HEX.decode("0001020304050607"));
-
-// void generateSecrets() {
-//   final initial_salt = Uint8List.fromList(
-//     HEX.decode("38762cf7f55934b34d179ae6a4c80cadccbb7f0a"),
-//   );
-//   final initial_random = randomData;
-//   final initial_secret = hkdfExtract(initial_random, salt: initial_salt);
-//   final client_secret = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "client in",
-//     length: 32,
-//   );
-//   final server_secret = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "server in",
-//     length: 32,
-//   );
-//   final client_key = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic key",
-//     length: 16,
-//   );
-//   final server_key = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic key",
-//     length: 16,
-//   );
-//   final client_iv = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic iv",
-//     length: 12,
-//   );
-//   final server_iv = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic iv",
-//     length: 12,
-//   );
-
-//   final client_hp_key = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic hp",
-//     length: 16,
-//   );
-//   final server_hp_key = hkdfExpandLabel(
-//     secret: initial_secret,
-//     context: Uint8List(0),
-//     label: "quic hp",
-//     length: 16,
-//   );
-
-//   //   initial_salt = 38762cf7f55934b34d179ae6a4c80cadccbb7f0a
-//   // initial_random = (random bytes from client given above)
-//   // initial_secret = HKDF-Extract(salt: initial_salt, key: initial_random)
-//   // client_secret = HKDF-Expand-Label(key: initial_secret, label: "client in", ctx: "", len: 32)
-//   // server_secret = HKDF-Expand-Label(key: initial_secret, label: "server in", ctx: "", len: 32)
-//   // client_key = HKDF-Expand-Label(key: client_secret, label: "quic key", ctx: "", len: 16)
-//   // server_key = HKDF-Expand-Label(key: server_secret, label: "quic key", ctx: "", len: 16)
-//   // client_iv = HKDF-Expand-Label(key: client_secret, label: "quic iv", ctx: "", len: 12)
-//   // server_iv = HKDF-Expand-Label(key: server_secret, label: "quic iv", ctx: "", len: 12)
-//   // client_hp_key = HKDF-Expand-Label(key: client_secret, label: "quic hp", ctx: "", len: 16)
-//   // server_hp_key = HKDF-Expand-Label(key: server_secret, label: "quic hp", ctx: "", len: 16)
-// }
-
-// final randomData = Uint8List.fromList(HEX.decode("0001020304050607"));
 
 final clientHello = Uint8List.fromList(
   HEX.decode(
@@ -168,6 +97,18 @@ final serverHello = Uint8List.fromList(
     "2 00 00 56 03 03 70 71 72 73 74 75 76 77 78 79 7a 7b 7c 7d 7e 7f 80 81 82 83 84 85 86 87 88 89 8a 8b 8c 8d 8e 8f 00 13 01 00 00 2e 00 33 00 24 00 1d 00 20 9f d7 ad 6d cf f4 29 8d d3 f9 6d 5b 1b 2a f9 10 a0 53 5b 14 88 d7 f8 fa bb 34 9a 98 28 80 b6 15 00 2b 00 02 03 04",
   ),
 );
+
+final tlsHandShakeMsg = Uint8List.fromList(
+  HEX.decode(
+    "08 00 00 56 00 54 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 39 00 41 00 08 00 01 02 03 04 05 06 07 01 04 80 01 d4 c0 03 04 80 00 ff f7 04 04 80 50 00 00 05 04 80 08 00 00 06 04 80 08 00 00 07 04 80 08 00 00 08 01 02 09 01 02 0a 01 03 0b 01 19 0f 05 73 5f 63 69 64",
+  ),
+);
+final tlsCertificate = Uint8List.fromList(
+  HEX.decode(
+    "0b 00 03 2e 00 00 03 2a 00 03 25 30 82 03 21 30 82 02 09 a0 03 02 01 02 02 08 15 5a 92 ad c2 04 8f 90 30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 30 22 31 0b 30 09 06 03 55 04 06 13 02 55 53 31 13 30 11 06 03 55 04 0a 13 0a 45 78 61 6d 70 6c 65 20 43 41 30 1e 17 0d 31 38 31 30 30 35 30 31 33 38 31 37 5a 17 0d 31 39 31 30 30 35 30 31 33 38 31 37 5a 30 2b 31 0b 30 09 06 03 55 04 06 13 02 55 53 31 1c 30 1a 06 03 55 04 03 13 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 30 82 01 22 30 0d 06 09 2a 86 48 86 f7 0d 01 01 01 05 00 03 82 01 0f 00 30 82 01 0a 02 82 01 01 00 c4 80 36 06 ba e7 47 6b 08 94 04 ec a7 b6 91 04 3f f7 92 bc 19 ee fb 7d 74 d7 a8 0d 00 1e 7b 4b 3a 4a e6 0f e8 c0 71 fc 73 e7 02 4c 0d bc f4 bd d1 1d 39 6b ba 70 46 4a 13 e9 4a f8 3d f3 e1 09 59 54 7b c9 55 fb 41 2d a3 76 52 11 e1 f3 dc 77 6c aa 53 37 6e ca 3a ec be c3 aa b7 3b 31 d5 6c b6 52 9c 80 98 bc c9 e0 28 18 e2 0b f7 f8 a0 3a fd 17 04 50 9e ce 79 bd 9f 39 f1 ea 69 ec 47 97 2e 83 0f b5 ca 95 de 95 a1 e6 04 22 d5 ee be 52 79 54 a1 e7 bf 8a 86 f6 46 6d 0d 9f 16 95 1a 4c f7 a0 46 92 59 5c 13 52 f2 54 9e 5a fb 4e bf d7 7a 37 95 01 44 e4 c0 26 87 4c 65 3e 40 7d 7d 23 07 44 01 f4 84 ff d0 8f 7a 1f a0 52 10 d1 f4 f0 d5 ce 79 70 29 32 e2 ca be 70 1f df ad 6b 4b b7 11 01 f4 4b ad 66 6a 11 13 0f e2 ee 82 9e 4d 02 9d c9 1c dd 67 16 db b9 06 18 86 ed c1 ba 94 21 02 03 01 00 01 a3 52 30 50 30 0e 06 03 55 1d 0f 01 01 ff 04 04 03 02 05 a0 30 1d 06 03 55 1d 25 04 16 30 14 06 08 2b 06 01 05 05 07 03 02 06 08 2b 06 01 05 05 07 03 01 30 1f 06 03 55 1d 23 04 18 30 16 80 14 89 4f de 5b cc 69 e2 52 cf 3e a3 00 df b1 97 b8 1d e1 c1 46 30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 03 82 01 01 00 59 16 45 a6 9a 2e 37 79 e4 f6 dd 27 1a ba 1c 0b fd 6c d7 55 99 b5 e7 c3 6e 53 3e ff 36 59 08 43 24 c9 e7 a5 04 07 9d 39 e0 d4 29 87 ff e3 eb dd 09 c1 cf 1d 91 44 55 87 0b 57 1d d1 9b df 1d 24 f8 bb 9a 11 fe 80 fd 59 2b a0 39 8c de 11 e2 65 1e 61 8c e5 98 fa 96 e5 37 2e ef 3d 24 8a fd e1 74 63 eb bf ab b8 e4 d1 ab 50 2a 54 ec 00 64 e9 2f 78 19 66 0d 3f 27 cf 20 9e 66 7f ce 5a e2 e4 ac 99 c7 c9 38 18 f8 b2 51 07 22 df ed 97 f3 2e 3e 93 49 d4 c6 6c 9e a6 39 6d 74 44 62 a0 6b 42 c6 d5 ba 68 8e ac 3a 01 7b dd fc 8e 2c fc ad 27 cb 69 d3 cc dc a2 80 41 44 65 d3 ae 34 8c e0 f3 4a b2 fb 9c 61 83 71 31 2b 19 10 41 64 1c 23 7f 11 a5 d6 5c 84 4f 04 04 84 99 38 71 2b 95 9e d6 85 bc 5c 5d d6 45 ed 19 90 94 73 40 29 26 dc b4 0e 34 69 a1 59 41 e8 e2 cc a8 4b b6 08 46 36 a0 00 00",
+  ),
+);
+
 void main() {
   generateSecrets(); // QUIC Initial
   clientKeyCalculation(); // X25519
@@ -175,6 +116,8 @@ void main() {
   handshakeKeyDerivationTest(); // Handshake keys
   applicationKeyDerivationTest(); // 1-RTT application keys ✅
   clientApplicationKeyDerivationTest(); // client-side confirmation ✅
+
+  testDecryption();
 }
 
 final randomData = Uint8List.fromList(HEX.decode("0001020304050607"));
@@ -756,4 +699,307 @@ void finished() {
   );
 
   print("✅ TLS 1.3 Finished verify_data (client + server) verified");
+}
+
+// void testDecryption() {
+//   final initialClientPacket = decryptQuicPacketBytes2(
+//     udp1ClientHello,
+//     Uint8List.fromList(HEX.decode("b14b918124fda5c8d79847602fa3520b")),
+//     Uint8List.fromList(HEX.decode("ddbc15dea80925a55686a7df")),
+//     Uint8List.fromList(HEX.decode("6df4e9d737cdf714711d7c617ee82981")),
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     0,
+//   );
+
+//   final initialServerPacket = decryptQuicPacketBytes2(
+//     udp2ServerHello,
+//     Uint8List.fromList(HEX.decode("d77fc4056fcfa32bd1302469ee6ebf90")),
+//     Uint8List.fromList(HEX.decode("fcb748e37ff79860faa07477")),
+//     Uint8List.fromList(HEX.decode("440b2725e91dc79b370711ef792faa3d")),
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     0,
+//   );
+
+//   final serverHandShakePacket = decryptQuicPacketBytes2(
+//     upd2HandshakePacket,
+//     Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+//     Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+//     Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     1,
+//   );
+
+//   final serverHandShakeFinishedPacket = decryptQuicPacketBytes2(
+//     udp3ServerHandshakeFinished,
+//     Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+//     Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+//     Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     1,
+//   );
+
+//   final clientInitialKey = Uint8List.fromList(
+//     HEX.decode('b14b918124fda5c8d79847602fa3520b'),
+//   );
+
+//   final clientInitialIv = Uint8List.fromList(
+//     HEX.decode('ddbc15dea80925a55686a7df'),
+//   );
+
+//   final clientInitialHp = Uint8List.fromList(
+//     HEX.decode('6df4e9d737cdf714711d7c617ee82981'),
+//   );
+
+//   decryptQuicPacketBytes2(
+//     udp4ClientinitialAck,
+//     clientInitialKey,
+//     clientInitialIv,
+//     clientInitialHp,
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     1,
+//   );
+
+//   final clientHandShakeFinishedPacket = decryptQuicPacketBytes2(
+//     udp5ClientHandshakeFinished,
+//     Uint8List.fromList(HEX.decode("30a7e816f6a1e1b3434cf39cf4b415e7")),
+//     Uint8List.fromList(HEX.decode("11e70a5d1361795d2bb04465")),
+//     Uint8List.fromList(HEX.decode("84b3c21cacaf9f54c885e9a506459079")),
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     1,
+//   );
+
+//   decryptQuicPacketBytes2(
+//     udp6ServerHandshakeAck,
+//     // Server → Client Handshake traffic keys
+//     Uint8List.fromList(
+//       HEX.decode("17abbf0a788f96c6986964660414e7ec"),
+//     ), // server handshake key
+//     Uint8List.fromList(
+//       HEX.decode("09597a2ea3b04c00487e71f3"),
+//     ), // server handshake IV
+//     Uint8List.fromList(
+//       HEX.decode("2a18061c396c2828582b41b0910ed536"),
+//     ), // server handshake HP key
+//     // DCID ignored for long headers, but required by signature
+//     Uint8List.fromList(HEX.decode("0001020304050607")),
+//     1, // largest PN seen so far in handshake space
+//   );
+
+//   final correctDcid = Uint8List.fromList(
+//     HEX.decode("635f636964"), // "c_cid"
+//   );
+
+//   // decryptQuicPacketBytes2(
+//   //   udp6ServerApp,
+//   //   serverAppKey,
+//   //   serverAppIv,
+//   //   serverAppHp,
+//   //   correctDcid,
+//   //   2,
+//   // );
+
+//   final clientApplicationdPacket = decryptQuicPacketBytes2(
+//     // udp5ClientPing,
+//     udp5ClientPing,
+//     Uint8List.fromList(HEX.decode("e010a295f0c2864f186b2a7e8fdc9ed7")),
+//     Uint8List.fromList(HEX.decode("eb3fbc384a3199dcf6b4c808")),
+//     Uint8List.fromList(HEX.decode("8a6a38bc5cc40cb482a254dac68c9d2f")),
+//     correctDcid,
+//     2,
+//   );
+
+//   final serverApplicationdPacket = decryptQuicPacketBytes2(
+//     // udp5ClientPing,
+//     udp6ServerApp,
+//     Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+//     Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+//     Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+//     correctDcid,
+//     2,
+//   );
+
+//   decryptQuicPacketBytes2(
+//     udp6ServerApp,
+//     // Server application read keys
+//     Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+//     Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+//     Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+//     // implicit DCID = "c_cid"
+//     Uint8List.fromList(HEX.decode("635f636964")),
+//     2, // largest PN seen in application space so far
+//   );
+
+//   decryptQuicPacketBytes2(
+//     udp7ServerApp,
+//     // Server application read keys
+//     Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+//     Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+//     Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+//     // implicit DCID = "c_cid"
+//     Uint8List.fromList(HEX.decode("635f636964")),
+//     2, // same PN space as other 1‑RTT packets
+//   );
+
+//   decryptQuicPacketBytes2(
+//     udp8ServerClose,
+//     // Server application read keys
+//     Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+//     Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+//     Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+//     // implicit DCID = "c_cid"
+//     Uint8List.fromList(HEX.decode("635f636964")),
+//     2,
+//   );
+// }
+
+void testDecryption() {
+  // ============================
+  // Initial PN space
+  // ============================
+
+  // Client Initial, PN = 0
+  decryptQuicPacketBytes2(
+    udp1ClientHello,
+    Uint8List.fromList(HEX.decode("b14b918124fda5c8d79847602fa3520b")),
+    Uint8List.fromList(HEX.decode("ddbc15dea80925a55686a7df")),
+    Uint8List.fromList(HEX.decode("6df4e9d737cdf714711d7c617ee82981")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // Server Initial, PN = 0
+  decryptQuicPacketBytes2(
+    udp2ServerHello,
+    Uint8List.fromList(HEX.decode("d77fc4056fcfa32bd1302469ee6ebf90")),
+    Uint8List.fromList(HEX.decode("fcb748e37ff79860faa07477")),
+    Uint8List.fromList(HEX.decode("440b2725e91dc79b370711ef792faa3d")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // Client Initial ACK, PN = 1 (largest initial PN = 0)
+  decryptQuicPacketBytes2(
+    udp4ClientinitialAck,
+    Uint8List.fromList(HEX.decode("b14b918124fda5c8d79847602fa3520b")),
+    Uint8List.fromList(HEX.decode("ddbc15dea80925a55686a7df")),
+    Uint8List.fromList(HEX.decode("6df4e9d737cdf714711d7c617ee82981")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // ============================
+  // Handshake PN space
+  // ============================
+
+  // Server Handshake, PN = 0
+  decryptQuicPacketBytes2(
+    upd2HandshakePacket,
+    Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+    Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+    Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // Server Handshake Finished, PN = 1
+  decryptQuicPacketBytes2(
+    udp3ServerHandshakeFinished,
+    Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+    Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+    Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // Client Handshake Finished, PN = 1
+  decryptQuicPacketBytes2(
+    udp5ClientHandshakeFinished,
+    Uint8List.fromList(HEX.decode("30a7e816f6a1e1b3434cf39cf4b415e7")),
+    Uint8List.fromList(HEX.decode("11e70a5d1361795d2bb04465")),
+    Uint8List.fromList(HEX.decode("84b3c21cacaf9f54c885e9a506459079")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    0,
+  );
+
+  // Server Handshake ACK, PN = 2
+  decryptQuicPacketBytes2(
+    udp6ServerHandshakeAck,
+    Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+    Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+    Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+    Uint8List.fromList(HEX.decode("0001020304050607")),
+    1,
+  );
+
+  // ============================
+  // Application PN space
+  // ============================
+
+  final correctDcid = Uint8List.fromList(
+    HEX.decode("635f636964"), // "c_cid"
+  );
+
+  // Client 1‑RTT, PN = 0
+  decryptQuicPacketBytes2(
+    udp5ClientPing,
+    Uint8List.fromList(HEX.decode("e010a295f0c2864f186b2a7e8fdc9ed7")),
+    Uint8List.fromList(HEX.decode("eb3fbc384a3199dcf6b4c808")),
+    Uint8List.fromList(HEX.decode("8a6a38bc5cc40cb482a254dac68c9d2f")),
+    correctDcid,
+    0,
+  );
+
+  // Server 1‑RTT, PN = 0
+  decryptQuicPacketBytes2(
+    udp6ServerApp,
+    Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+    Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+    Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+    correctDcid,
+    0,
+  );
+
+  // Server 1‑RTT, PN = 1 (ACK‑only packet)
+  // decryptQuicPacketBytes2(
+  //   udp7ServerApp,
+  //   Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+  //   Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+  //   Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+  //   correctDcid,
+  //   0,
+  // );
+
+  // decryptQuicPacketBytes2(
+  //   udp7ServerApp,
+  //   Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+  //   Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+  //   Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+  //   correctDcid,
+  //   0, // ✅ NOT 2
+  // );
+
+  decryptQuicPacketBytes2(
+    udp7ServerApp,
+    // ✅ CLIENT application keys (not server)
+    Uint8List.fromList(HEX.decode("e010a295f0c2864f186b2a7e8fdc9ed7")),
+    Uint8List.fromList(HEX.decode("eb3fbc384a3199dcf6b4c808")),
+    Uint8List.fromList(HEX.decode("8a6a38bc5cc40cb482a254dac68c9d2f")),
+    // DCID = s_cid (client chose it, peer knows length)
+    Uint8List.fromList(
+      HEX.decode(
+        "735f636964", // "s_cid"
+      ),
+    ),
+    0, // largest PN seen so far in client application PN space
+  );
+
+  // Server CONNECTION_CLOSE, PN = 1
+  decryptQuicPacketBytes2(
+    udp8ServerClose,
+    Uint8List.fromList(HEX.decode("fd8c7da9de1b2da4d2ef9fd5188922d0")),
+    Uint8List.fromList(HEX.decode("02f6180e4f4aa456d7e8a602")),
+    Uint8List.fromList(HEX.decode("b7f6f021453e52b58940e4bba72a35d4")),
+    correctDcid,
+    0,
+  );
 }

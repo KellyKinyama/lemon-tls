@@ -1,0 +1,16 @@
+{
+  "role": "server",
+  "encryption_level": "application",
+  "keys": {
+    "key": "e010a295f0c2864f186b2a7e8fdc9ed7",
+    "iv": "eb3fbc384a3199dcf6b4c808",
+    "hp": "8a6a38bc5cc40cb482a254dac68c9d2f"
+  },
+  "packet": {
+    "packet_number": 0,
+    "key_phase": false,
+    "dcid": "735f636964"
+  },
+  "plaintext": "0f0000400470696e67",
+  "protected_packet": "4e735f6369641ecc9170e66e8ee950ba8b8ed10cba39a06ab7b0670a50ef68e6"
+}

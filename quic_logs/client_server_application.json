@@ -1,0 +1,16 @@
+{
+  "role": "client",
+  "encryption_level": "application",
+  "keys": {
+    "key": "fd8c7da9de1b2da4d2ef9fd5188922d0",
+    "iv": "02f6180e4f4aa456d7e8a602",
+    "hp": "b7f6f021453e52b58940e4bba72a35d4"
+  },
+  "packet": {
+    "packet_number": 0,
+    "key_phase": false,
+    "dcid": "635f636964"
+  },
+  "plaintext": "02001200001e0f00004004706f6e67",
+  "protected_packet": "49635f636964cd9a64124057c883e94d9c296baa8ca0ea6e3a21faaf99af2fe10321692057d2"
+}

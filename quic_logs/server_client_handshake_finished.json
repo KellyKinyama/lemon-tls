@@ -1,0 +1,16 @@
+{
+  "role": "server",
+  "encryption_level": "handshake",
+  "keys": {
+    "key": "30a7e816f6a1e1b3434cf39cf4b415e7",
+    "iv": "11e70a5d1361795d2bb04465",
+    "hp": "84b3c21cacaf9f54c885e9a506459079"
+  },
+  "packet": {
+    "packet_number": 1,
+    "key_phase": false,
+    "dcid": ""
+  },
+  "plaintext": "020140460001060040241400002050ffb0c1a425c641891c983d126726026d3db28ea3510bdc2054fcd637edcacc",
+  "protected_packet": "e00000000105735f63696405635f636964403fb25e1e459da7e61daa07732aa10b5fbd11a00a620bf5e127e37b81bb10f11c312e7f9c04a43cd530f3d981d5023abd5e98f22dc6f25979919bad302f448c0a"
+}

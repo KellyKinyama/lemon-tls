@@ -1,0 +1,16 @@
+{
+  "role": "client",
+  "encryption_level": "handshake",
+  "keys": {
+    "key": "17abbf0a788f96c6986964660414e7ec",
+    "iv": "09597a2ea3b04c00487e71f3",
+    "hp": "2a18061c396c2828582b41b0910ed536"
+  },
+  "packet": {
+    "packet_number": 2,
+    "key_phase": false,
+    "dcid": ""
+  },
+  "plaintext": "02011c0001",
+  "protected_packet": "e50000000105635f63696405735f6369644016a4875b25169e6f1b817e4623e1acbe1db3899b00ecfb"
+}
