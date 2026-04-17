@@ -178,6 +178,49 @@ class QuicSession {
 
     return encrypted;
   }
+
+  Uint8List buildHandshakeMsg() {
+    // SERVER → CLIENT handshake protection keys (deduced from end_to_end.dart):
+    // client.setReadKeys(EncryptionLevel.handshake, ...)
+    final serverToClientHsKeys = QuicTrafficKeys(
+      key: Uint8List.fromList(HEX.decode("17abbf0a788f96c6986964660414e7ec")),
+      iv: Uint8List.fromList(HEX.decode("09597a2ea3b04c00487e71f3")),
+      hp: Uint8List.fromList(HEX.decode("2a18061c396c2828582b41b0910ed536")),
+    );
+
+    // Build CRYPTO frame for the server handshake flight.
+    // IMPORTANT: QUIC CRYPTO frame uses varints for offset/len in real QUIC,
+    // but your test vectors likely use your buildCryptoFrame() helper—keep it consistent.
+    final cryptoFrame = buildCryptoFrame(
+      Uint8List.fromList(
+        HEX.decode(
+          "06 43 ff 40 b9 46 1e 8a 23 40 58 98 8e 7f 26 4d 7a b6 a5 1a 21 c6 29 79 b7 a6 79 f4 a0 87 70 85 6e 92 6d 37 1b 2e 89 16 9a a1 90 b8 03 63 6b b1 0c 0f b9 05 98 3d 2b 50 0a ad 26 83 df be 15 6e cc f6 66 de 1a 5a d4 5d 77 38 d5 e7 8b d1 7b c3 e6 d2 5f 9a d4 af ba 8f 81 de 9f 4d 55 72 11 8e 08 55 1a 4b b9 4b 56 a9 70 e8 04 c6 82 67 45 4b 51 7f c8 38 6c 9b ae 3a 77 cc cb 7f 29 0f 6e 58 fb a1 26 f0 53 33 a1 1f 8a b0 89 2e 6e 7a 89 58 53 82 d3 6e ef 25 29 cf 5b 7b 14 00 00 20 06 8f cb 60 6a a1 c8 aa 35 4d 7b 60 64 a3 32 8c f3 76 bc d9 f3 20 0e 68 ac e3 de 2e e9 fc ac cb",
+        ),
+      ),
+    );
+
+    // For server packets:
+    //   DCID = client's CID (peerCid)
+    //   SCID = server's CID (myCid)
+    const pn = 0;
+
+    final pkt = encryptQuicPacket(
+      "handshake",
+      cryptoFrame,
+      serverToClientHsKeys.key,
+      serverToClientHsKeys.iv,
+      serverToClientHsKeys.hp,
+      pn,
+      peerCid,
+      myCid,
+      null,
+    );
+
+    if (pkt == null) {
+      throw StateError("Failed to encrypt handshake packet");
+    }
+    return pkt;
+  }
 }
 
 Uint8List buildCryptoFrame(Uint8List cryptoData) {
@@ -280,6 +323,12 @@ void testEndToEnd() {
 
   client.decryptPacket(udp2ServerHello, EncryptionLevel.initial);
   print("");
+  final hsMsg = server.buildHandshakeMsg();
+  expectBytesEqual(
+    "Server handshake match: ",
+    hsMsg,
+    HEX.encode(upd2HandshakePacket),
+  );
   client.decryptPacket(upd2HandshakePacket, EncryptionLevel.handshake);
   client.decryptPacket(udp3ServerHandshakeFinished, EncryptionLevel.handshake);
   server.decryptPacket(udp4ClientinitialAck, EncryptionLevel.initial);
