@@ -98,6 +98,8 @@ class QuicSession {
   final serverCid = Uint8List.fromList(HEX.decode("0001020304050607"));
   final clientCid = Uint8List.fromList(HEX.decode("635f636964")); // "c_cid"
 
+  final s_cid = Uint8List.fromList(HEX.decode("735f636964")); // "s_cid"
+
   QuicSession(this.role);
 
   // ------------------------------------------------------------
@@ -158,7 +160,9 @@ class QuicSession {
   }
 
   Uint8List buildServerInitial() {
-    final frames = buildCryptoFrame(serverHello);
+    final cryptoFrame = buildCryptoFrame(serverHello);
+    final ackFrame = Uint8List.fromList([0x02, 0x00, 0x42, 0x40, 0x00, 0x00]);
+    final frames = concatUint8Lists([ackFrame, cryptoFrame]);
 
     final encrypted = encryptQuicPacket(
       'initial',
@@ -167,8 +171,8 @@ class QuicSession {
       serverInitialIv,
       serverInitialHp,
       0,
-      serverCid,
       clientCid,
+      s_cid,
       Uint8List(0),
     )!;
 
