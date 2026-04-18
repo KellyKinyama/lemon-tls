@@ -6,6 +6,7 @@ import 'package:hex/hex.dart';
 import 'package:lemon_tls/quic/handshake/server_hello.dart';
 import '../cipher/x25519.dart';
 import '../frames/quic_frames.dart';
+import '../handshake/finished.dart';
 import '../handshake/tls_messages.dart';
 import '../hash.dart';
 import '../quic_ack.dart';
@@ -14,6 +15,10 @@ import 'payload_parser.dart';
 import '../hkdf.dart';
 import '../packet/quic_packet.dart';
 import '../utils.dart';
+
+Uint8List buildCryptoFrame(Uint8List data) {
+  return Uint8List.fromList([0x06, 0x00, data.length, ...data]);
+}
 
 Uint8List _padTo1200(Uint8List pkt) {
   const minInitialSize = 1200;
@@ -109,6 +114,8 @@ class QuicSession {
     EncryptionLevel.application: PacketNumberSpace(),
   };
 
+  late final Uint8List derivedSecret;
+
   final peerScid = Uint8List.fromList(HEX.decode("635f636964"));
   final localCid = Uint8List.fromList(HEX.decode("0001020304050607"));
   void sendAck({
@@ -175,8 +182,114 @@ class QuicSession {
     );
   }
 
+  void sendClientFinished({
+    required InternetAddress address,
+    required int port,
+  }) {
+    if (handshakeWrite == null) {
+      throw StateError("Handshake write keys not available");
+    }
+
+    // =====================================================
+    // 1. Compute transcript hash (up to CertificateVerify)
+    // =====================================================
+    final transcriptHash = createHash(tlsTranscript.toBytes());
+
+    // =====================================================
+    // 2. Derive finished_key
+    // finished_key =
+    // HKDF-Expand-Label(
+    //   client_hs_traffic_secret,
+    //   "finished",
+    //   "",
+    //   Hash.length
+    // )
+    // =====================================================
+    final finishedKey = hkdfExpandLabel(
+      secret: clientHsTrafficSecret,
+      label: "finished",
+      context: Uint8List(0),
+      length: 32, // SHA-256
+    );
+
+    // =====================================================
+    // 3. Compute verify_data
+    // verify_data = HMAC(finished_key, transcript_hash)
+    // =====================================================
+    final verifyData = hmacSha256(key: finishedKey, data: transcriptHash);
+
+    // =====================================================
+    // 4. Build TLS Finished handshake message
+    // HandshakeType.finished = 20 (0x14)
+    // =====================================================
+    final finishedHandshake = BytesBuilder()
+      ..addByte(0x14)
+      ..add([
+        (verifyData.length >> 16) & 0xff,
+        (verifyData.length >> 8) & 0xff,
+        verifyData.length & 0xff,
+      ])
+      ..add(verifyData);
+
+    final finishedBytes = finishedHandshake.toBytes();
+
+    // IMPORTANT: append Finished to transcript AFTER computing verify_data
+    tlsTranscript.add(finishedBytes);
+
+    // =====================================================
+    // 5. Wrap in CRYPTO frame (using your helper)
+    // =====================================================
+    final cryptoPayload = buildCryptoFrame(finishedBytes);
+
+    // =====================================================
+    // 6. Allocate packet number (Handshake PN space)
+    // =====================================================
+    final ackState = ackStates[EncryptionLevel.handshake]!;
+    final pn = ackState.allocatePn();
+
+    // =====================================================
+    // 7. Encrypt Handshake packet
+    // =====================================================
+    final rawPacket = encryptQuicPacket(
+      "handshake",
+      cryptoPayload,
+      handshakeWrite!.key,
+      handshakeWrite!.iv,
+      handshakeWrite!.hp,
+      pn,
+      peerScid, // DCID = server's CID
+      localCid, // SCID = our CID
+      Uint8List(0),
+    );
+
+    if (rawPacket == null) {
+      print("❌ Failed to encrypt Client Finished");
+      return;
+    }
+
+    // =====================================================
+    // 8. Send (NO padding for Handshake packets)
+    // =====================================================
+    socket.send(rawPacket, address, port);
+
+    print(
+      "✅ Sent Client Finished (Handshake) "
+      "pn=$pn verify_data=${HEX.encode(verifyData)}",
+    );
+  }
+
   /// Traffic keys by level and direction
   final _readKeys = <EncryptionLevel, QuicKeys>{};
+
+  final _writeKeys = <EncryptionLevel, QuicKeys>{};
+
+  final BytesBuilder receivedHandshakeBytes = BytesBuilder();
+
+  late Uint8List clientHsTrafficSecret;
+
+  bool serverFinishedReceived = false;
+  bool clientFinishedSent = false;
+  bool applicationSecretsDerived = false;
 
   QuicSession(this.dcid, this.socket) {
     generateSecrets();
@@ -196,23 +309,55 @@ class QuicSession {
     ),
   );
 
-  final Map<int, Uint8List> cryptoChunks = {};
-  int cryptoReadOffset = 0;
+  final Map<EncryptionLevel, Map<int, Uint8List>> cryptoChunksByLevel = {
+    EncryptionLevel.initial: <int, Uint8List>{},
+    EncryptionLevel.handshake: <int, Uint8List>{},
+  };
+
+  final Map<EncryptionLevel, int> cryptoReadOffsetByLevel = {
+    EncryptionLevel.initial: 0,
+    EncryptionLevel.handshake: 0,
+  };
 
   final BytesBuilder tlsTranscript = BytesBuilder();
 
   /// Try to assemble contiguous CRYPTO stream bytes.
   /// Returns newly available bytes (may be empty).
-  Uint8List assembleCryptoStream() {
+  Uint8List assembleCryptoStream(EncryptionLevel level) {
+    final chunks = cryptoChunksByLevel[level]!;
+    int readOffset = cryptoReadOffsetByLevel[level]!;
+
     final result = <int>[];
 
-    while (cryptoChunks.containsKey(cryptoReadOffset)) {
-      final chunk = cryptoChunks.remove(cryptoReadOffset)!;
+    while (chunks.containsKey(readOffset)) {
+      final chunk = chunks.remove(readOffset)!;
       result.addAll(chunk);
-      cryptoReadOffset += chunk.length;
+      readOffset += chunk.length;
     }
 
+    cryptoReadOffsetByLevel[level] = readOffset;
     return Uint8List.fromList(result);
+  }
+
+  void onDecryptedPacket(
+    QuicDecryptedPacket decryptedPacket,
+    EncryptionLevel level,
+    InternetAddress address,
+    int port,
+  ) {
+    // ✅ Track packet number in the correct ACK space
+    final ackState = ackStates[level];
+    if (ackState == null) {
+      return;
+    }
+
+    ackState.received.add(decryptedPacket.packetNumber);
+
+    // ✅ Immediate ACK for Initial + Handshake
+    if (level == EncryptionLevel.initial ||
+        level == EncryptionLevel.handshake) {
+      sendAck(level: level, address: address.address, port: port);
+    }
   }
 
   // helloHash: 20df6b6164e17b874575a7636338ac7f178c99c758cd0026697eec31148a3bf8
@@ -255,18 +400,15 @@ class QuicSession {
   //   return hash;
   // }
 
-  Uint8List testHash() {
-    // --- ClientHello (already correct and static) ---
-    final clientHello = Uint8List.fromList(
-      HEX.decode(
-        "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64",
-      ),
-    );
-
-    final transcript = Uint8List.fromList([
-      ...clientHello,
-      ...tlsTranscript.toBytes(), // ✅ exact ServerHello bytes
+  Uint8List transcriptThroughServerHandshake() {
+    return Uint8List.fromList([
+      ...clientHelloBytes,
+      ...tlsTranscript.toBytes(),
     ]);
+  }
+
+  Uint8List testHash() {
+    final transcript = transcriptThroughServerHandshake();
 
     print("Hashing ClientHello + ServerHello: ${HEX.encode(transcript)}");
 
@@ -479,251 +621,6 @@ class QuicSession {
     initialRead = QuicKeys(key: server_key, iv: server_iv, hp: server_hp_key);
   }
 
-  // void handshakeKeyDerivationTest() {
-  //   // --- Shared secret (already verified correct) ---
-  //   final sharedSecret = x25519ShareSecret(
-  //     privateKey: privateKeyBytes,
-  //     publicKey: receivedServello!.keyShareEntry!.pub,
-  //   );
-  //   print("Shared secret: ${HEX.encode(sharedSecret)}");
-
-  //   // --- Transcript hash (ClientHello || ServerHello) ---
-  //   final helloHash = testHash();
-  //   print("helloHash: ${HEX.encode(helloHash)}");
-
-  //   // ==================================================
-  //   // TLS 1.3 Key Schedule (RFC 8446 §7.1)
-  //   // ==================================================
-
-  //   final hashLen = 32; // SHA-256
-  //   final zero = Uint8List(hashLen);
-  //   final empty = Uint8List(0);
-
-  //   // ✅ early_secret = HKDF-Extract(zeros, empty)
-  //   // salt = zeros, ikm = empty
-  //   final earlySecret = hkdfExtract(empty, salt: zero);
-
-  //   // ✅ derived_secret = HKDF-Expand-Label(..., "derived", "")
-  //   final derivedSecret = hkdfExpandLabel(
-  //     secret: earlySecret,
-  //     label: "derived",
-  //     context: empty, // ✅ EMPTY CONTEXT (NOT Hash(""))
-  //     length: hashLen,
-  //   );
-
-  //   // ✅ handshake_secret = HKDF-Extract(derived_secret, shared_secret)
-  //   final handshakeSecret = hkdfExtract(sharedSecret, salt: derivedSecret);
-
-  //   // ✅ Handshake traffic secrets
-  //   final clientHsTrafficSecret = hkdfExpandLabel(
-  //     secret: handshakeSecret,
-  //     label: "c hs traffic",
-  //     context: helloHash,
-  //     length: hashLen,
-  //   );
-
-  //   final serverHsTrafficSecret = hkdfExpandLabel(
-  //     secret: handshakeSecret,
-  //     label: "s hs traffic",
-  //     context: helloHash,
-  //     length: hashLen,
-  //   );
-
-  //   print("clientHsTrafficSecret: ${HEX.encode(clientHsTrafficSecret)}");
-  //   print("serverHsTrafficSecret: ${HEX.encode(serverHsTrafficSecret)}");
-
-  //   // ==================================================
-  //   // QUIC Handshake Keys
-  //   // ==================================================
-
-  //   final clientHandshakeKey = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic key",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final clientHandshakeIV = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic iv",
-  //     context: empty,
-  //     length: 12,
-  //   );
-
-  //   final clientHandshakeHP = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic hp",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final serverHandshakeKey = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic key",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final serverHandshakeIV = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic iv",
-  //     context: empty,
-  //     length: 12,
-  //   );
-
-  //   final serverHandshakeHP = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic hp",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   handshakeRead = QuicKeys(
-  //     key: serverHandshakeKey,
-  //     iv: serverHandshakeIV,
-  //     hp: serverHandshakeHP,
-  //   );
-  //   handshakeWrite = QuicKeys(
-  //     key: clientHandshakeKey,
-  //     iv: clientHandshakeIV,
-  //     hp: clientHandshakeHP,
-  //   );
-
-  //   _readKeys[EncryptionLevel.handshake] = handshakeRead!;
-
-  //   print("handshake read: $handshakeRead");
-  //   print("handshake write: $handshakeWrite");
-
-  //   print("✅ QUIC/TLS handshake keys derived (spec-correct)");
-  // }
-
-  // void handshakeKeyDerivationTest() {
-  //   // --- Shared secret (already verified correct) ---
-  //   final sharedSecret = x25519ShareSecret(
-  //     privateKey: privateKeyBytes,
-  //     publicKey: receivedServello!.keyShareEntry!.pub,
-  //   );
-  //   print("Shared secret: ${HEX.encode(sharedSecret)}");
-
-  //   // --- Transcript hash (ClientHello || ServerHello) ---
-  //   final helloHash = testHash();
-  //   print("helloHash: ${HEX.encode(helloHash)}");
-
-  //   // ==================================================
-  //   // TLS 1.3 Key Schedule (RFC 8446 §7.1)
-  //   // ==================================================
-
-  //   final hashLen = 32; // SHA-256
-  //   final zero = Uint8List(hashLen);
-  //   final empty = Uint8List(0);
-
-  //   // ✅ early_secret = HKDF-Extract(zeros, empty)
-  //   // TLS: HKDF-Extract(salt=zeros, ikm=empty)
-  //   final earlySecret = hkdfExtract(
-  //     empty, // ikm
-  //     salt: zero, // salt
-  //   );
-
-  //   // ✅ Hash("")
-  //   final emptyHash = createHash(empty);
-
-  //   // ✅ derived_secret = HKDF-Expand-Label(early_secret, "derived", Hash(""))
-  //   final derivedSecret = hkdfExpandLabel(
-  //     secret: earlySecret,
-  //     label: "derived",
-  //     context: emptyHash,
-  //     length: hashLen,
-  //   );
-
-  //   // ✅ handshake_secret = HKDF-Extract(derived_secret, shared_secret)
-  //   // TLS: HKDF-Extract(salt=derivedSecret, ikm=sharedSecret)
-  //   final handshakeSecret = hkdfExtract(
-  //     sharedSecret, // ikm
-  //     salt: derivedSecret, // salt
-  //   );
-
-  //   // ✅ Handshake traffic secrets
-  //   final clientHsTrafficSecret = hkdfExpandLabel(
-  //     secret: handshakeSecret,
-  //     label: "c hs traffic",
-  //     context: helloHash,
-  //     length: hashLen,
-  //   );
-
-  //   final serverHsTrafficSecret = hkdfExpandLabel(
-  //     secret: handshakeSecret,
-  //     label: "s hs traffic",
-  //     context: helloHash,
-  //     length: hashLen,
-  //   );
-
-  //   print("clientHsTrafficSecret: ${HEX.encode(clientHsTrafficSecret)}");
-  //   print("serverHsTrafficSecret: ${HEX.encode(serverHsTrafficSecret)}");
-
-  //   // ==================================================
-  //   // QUIC Handshake Keys (RFC 9001)
-  //   // ==================================================
-
-  //   final clientHandshakeKey = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic key",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final clientHandshakeIV = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic iv",
-  //     context: empty,
-  //     length: 12,
-  //   );
-
-  //   final clientHandshakeHP = hkdfExpandLabel(
-  //     secret: clientHsTrafficSecret,
-  //     label: "quic hp",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final serverHandshakeKey = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic key",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   final serverHandshakeIV = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic iv",
-  //     context: empty,
-  //     length: 12,
-  //   );
-
-  //   final serverHandshakeHP = hkdfExpandLabel(
-  //     secret: serverHsTrafficSecret,
-  //     label: "quic hp",
-  //     context: empty,
-  //     length: 16,
-  //   );
-
-  //   handshakeRead = QuicKeys(
-  //     key: serverHandshakeKey,
-  //     iv: serverHandshakeIV,
-  //     hp: serverHandshakeHP,
-  //   );
-
-  //   handshakeWrite = QuicKeys(
-  //     key: clientHandshakeKey,
-  //     iv: clientHandshakeIV,
-  //     hp: clientHandshakeHP,
-  //   );
-
-  //   _readKeys[EncryptionLevel.handshake] = handshakeRead!;
-
-  //   print("handshake read: $handshakeRead");
-  //   print("handshake write: $handshakeWrite");
-  //   print("✅ QUIC/TLS handshake keys derived (spec-correct)");
-  // }
   void handshakeKeyDerivationTest() {
     final sharedSecret = x25519ShareSecret(
       privateKey: privateKeyBytes,
@@ -750,7 +647,7 @@ class QuicSession {
     final emptyHash = createHash(empty);
 
     // ✅ DERIVED SECRET
-    final derivedSecret = hkdfExpandLabel(
+    derivedSecret = hkdfExpandLabel(
       secret: earlySecret,
       label: "derived",
       context: emptyHash,
@@ -763,7 +660,7 @@ class QuicSession {
       salt: derivedSecret, // salt
     );
 
-    final clientHsTrafficSecret = hkdfExpandLabel(
+    clientHsTrafficSecret = hkdfExpandLabel(
       secret: handshakeSecret,
       label: "c hs traffic",
       context: helloHash,
@@ -838,31 +735,263 @@ class QuicSession {
     print("✅ QUIC/TLS handshake keys derived (spec-correct)");
   }
 
+  void deriveApplicationSecrets() {
+    print("🔐 Deriving application (1‑RTT) secrets");
+
+    final hashLen = 32;
+    final zero = Uint8List(hashLen);
+    final empty = Uint8List(0);
+
+    // --------------------------------------------------
+    // Transcript hash THROUGH Finished
+    // (Finished already appended to tlsTranscript)
+    // --------------------------------------------------
+    final transcriptHash = createHash(transcriptThroughServerHandshake());
+    ;
+    print("Application Transcript Hash: ${HEX.encode(transcriptHash)}");
+
+    // --------------------------------------------------
+    // MASTER SECRET
+    // master_secret = HKDF‑Extract(derived_secret, zeros)
+    //
+    // NOTE: hkdfExtract(ikm, salt)
+    // TLS: HKDF‑Extract(salt = derived_secret, ikm = zeros)
+    // --------------------------------------------------
+    final masterSecret = hkdfExtract(
+      zero, // ikm
+      salt: derivedSecret, // salt
+    );
+
+    print("master_secret: ${HEX.encode(masterSecret)}");
+
+    // --------------------------------------------------
+    // CLIENT APPLICATION TRAFFIC SECRET 0
+    // --------------------------------------------------
+    final clientAppTrafficSecret = hkdfExpandLabel(
+      secret: masterSecret,
+      label: "c ap traffic",
+      context: transcriptHash,
+      length: hashLen,
+    );
+
+    // --------------------------------------------------
+    // SERVER APPLICATION TRAFFIC SECRET 0
+    // --------------------------------------------------
+    final serverAppTrafficSecret = hkdfExpandLabel(
+      secret: masterSecret,
+      label: "s ap traffic",
+      context: transcriptHash,
+      length: hashLen,
+    );
+
+    print(
+      "client_application_traffic_secret_0: "
+      "${HEX.encode(clientAppTrafficSecret)}",
+    );
+    print(
+      "server_application_traffic_secret_0: "
+      "${HEX.encode(serverAppTrafficSecret)}",
+    );
+
+    // --------------------------------------------------
+    // QUIC 1‑RTT WRITE KEYS (client → server)
+    // --------------------------------------------------
+    final clientAppKey = hkdfExpandLabel(
+      secret: clientAppTrafficSecret,
+      label: "quic key",
+      context: empty,
+      length: 16,
+    );
+
+    final clientAppIV = hkdfExpandLabel(
+      secret: clientAppTrafficSecret,
+      label: "quic iv",
+      context: empty,
+      length: 12,
+    );
+
+    final clientAppHP = hkdfExpandLabel(
+      secret: clientAppTrafficSecret,
+      label: "quic hp",
+      context: empty,
+      length: 16,
+    );
+
+    // --------------------------------------------------
+    // QUIC 1‑RTT READ KEYS (server → client)
+    // --------------------------------------------------
+    final serverAppKey = hkdfExpandLabel(
+      secret: serverAppTrafficSecret,
+      label: "quic key",
+      context: empty,
+      length: 16,
+    );
+
+    final serverAppIV = hkdfExpandLabel(
+      secret: serverAppTrafficSecret,
+      label: "quic iv",
+      context: empty,
+      length: 12,
+    );
+
+    final serverAppHP = hkdfExpandLabel(
+      secret: serverAppTrafficSecret,
+      label: "quic hp",
+      context: empty,
+      length: 16,
+    );
+
+    // --------------------------------------------------
+    // INSTALL APPLICATION KEYS
+    // --------------------------------------------------
+    appRead = QuicKeys(key: serverAppKey, iv: serverAppIV, hp: serverAppHP);
+
+    appWrite = QuicKeys(key: clientAppKey, iv: clientAppIV, hp: clientAppHP);
+
+    _readKeys[EncryptionLevel.application] = appRead!;
+    _writeKeys[EncryptionLevel.application] = appWrite!;
+
+    encryptionLevel = EncryptionLevel.application;
+
+    print("✅ 1‑RTT application keys installed");
+  }
+
+  bool tlsTranscriptContainsFinished() {
+    final Uint8List data = tlsTranscript.toBytes();
+
+    int i = 0;
+    while (i + 4 <= data.length) {
+      final int type = data[i];
+      final int len = (data[i + 1] << 16) | (data[i + 2] << 8) | data[i + 3];
+
+      // Finished (0x14) fully present
+      if (type == 0x14 && i + 4 + len <= data.length) {
+        return true;
+      }
+
+      i += 4 + len;
+    }
+
+    return false;
+  }
+
+  //   void handleQuicPacket(Uint8List pkt) {
+  //     final previousLevel = encryptionLevel;
+
+  //     print("Encryption level: $encryptionLevel");
+
+  //     // 1️⃣ Decrypt packet using current keys
+  //     final result = decryptPacket(pkt, encryptionLevel);
+  //     onDecryptedPacket(
+  //       result,
+  //       encryptionLevel,
+  //       InternetAddress("127.0.0.1"),
+  //       4433,
+  //     );
+
+  //     // 2️⃣ Parse QUIC payload (frames + TLS via CRYPTO reassembly)
+  //     final parsed = parsePayload(result.plaintext!, this);
+
+  //     // 3️⃣ Collect CRYPTO frames (for logging, debug, retransmission logic, etc.)
+  //     if (parsed.cryptoFrames.isNotEmpty) {
+  //       receivedCryptoFrames.addAll(parsed.cryptoFrames);
+  //     }
+
+  //     // 4️⃣ Collect parsed TLS handshake messages
+  //     if (parsed.tlsMessages.isNotEmpty) {
+  //       receivedTlsMessages.addAll(parsed.tlsMessages);
+  //     }
+
+  //     // 5️⃣ Transition encryption level if handshake progressed
+  //     // (e.g., after ServerHello is parsed)
+  //     if (encryptionLevel != previousLevel &&
+  //         encryptionLevel == EncryptionLevel.handshake) {
+  //       handshakeKeyDerivationTest();
+  //     }
+
+  //     // --- TLS / QUIC handshake state machine ---
+
+  //     // final gotServerFinished = parsed.tlsMessages.any(
+  //     //   (m) => m is FinishedMessage,
+  //     // );
+
+  //     final gotServerFinished = tlsTranscriptContainsFinished();
+
+  //     if (gotServerFinished && !serverFinishedReceived) {
+  //       serverFinishedReceived = true;
+  //       print("🧠 Server Finished processed");
+  //     }
+
+  //     // ✅ Send client Finished immediately after server Finished
+  //     if (serverFinishedReceived && !clientFinishedSent) {
+  //       sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
+  //       clientFinishedSent = true;
+  //       print("📤 Client Finished sent");
+  //     }
+
+  //     // ✅ Derive application secrets only AFTER Finished exchange
+  //     if (serverFinishedReceived &&
+  //         clientFinishedSent &&
+  //         !applicationSecretsDerived) {
+  //       deriveApplicationSecrets();
+  //       applicationSecretsDerived = true;
+  //       print("🔐 Application secrets derived");
+  //     }
+
+  //     print("parsed: $parsed");
+  //   }
   void handleQuicPacket(Uint8List pkt) {
+    final packetLevel = encryptionLevel;
     final previousLevel = encryptionLevel;
 
     print("Encryption level: $encryptionLevel");
 
-    // 1️⃣ Decrypt packet using current keys
-    final result = decryptPacket(pkt, encryptionLevel);
+    final result = decryptPacket(pkt, packetLevel);
+    onDecryptedPacket(result, packetLevel, InternetAddress("127.0.0.1"), 4433);
 
-    // 2️⃣ Parse QUIC payload (frames + TLS via CRYPTO reassembly)
-    final parsed = parsePayload(result.plaintext!, this);
+    final parsed = parsePayload(result.plaintext!, this, level: packetLevel);
 
-    // 3️⃣ Collect CRYPTO frames (for logging, debug, retransmission logic, etc.)
+    // 4️⃣ Collect CRYPTO frames (for logging / debugging)
     if (parsed.cryptoFrames.isNotEmpty) {
       receivedCryptoFrames.addAll(parsed.cryptoFrames);
     }
 
-    // 4️⃣ Collect parsed TLS handshake messages
+    // 5️⃣ Collect any parsed TLS messages
     if (parsed.tlsMessages.isNotEmpty) {
       receivedTlsMessages.addAll(parsed.tlsMessages);
     }
 
-    // 5️⃣ Transition encryption level if handshake progressed
-    // (e.g., after ServerHello is parsed)
-    if (encryptionLevel != previousLevel) {
+    // 6️⃣ If ServerHello caused a level transition, derive handshake keys
+    if (encryptionLevel != previousLevel &&
+        encryptionLevel == EncryptionLevel.handshake) {
       handshakeKeyDerivationTest();
+    }
+
+    // ================= TLS / QUIC STATE MACHINE =================
+
+    // Detect whether the received handshake stream now contains a full server Finished
+    final bool gotServerFinished = tlsTranscriptContainsFinished();
+
+    if (gotServerFinished && !serverFinishedReceived) {
+      serverFinishedReceived = true;
+      print("🧠 Server Finished processed");
+    }
+
+    // ✅ Derive application secrets BEFORE sending client Finished
+    // because your current sendClientFinished() appends the client Finished
+    // to tlsTranscript. Application secrets should be derived from the
+    // transcript THROUGH server Finished.
+    if (serverFinishedReceived && !applicationSecretsDerived) {
+      deriveApplicationSecrets();
+      applicationSecretsDerived = true;
+      print("🔐 Application secrets derived");
+    }
+
+    // ✅ Send Client Finished exactly once
+    if (serverFinishedReceived && !clientFinishedSent) {
+      sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
+      clientFinishedSent = true;
+      print("📤 Client Finished sent");
     }
 
     print("parsed: $parsed");
@@ -977,3 +1106,9 @@ List<Uint8List> splitCoalescedPackets(Uint8List buf) {
 
   return out;
 }
+
+final clientHelloBytes = Uint8List.fromList(
+  HEX.decode(
+    "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64",
+  ),
+);

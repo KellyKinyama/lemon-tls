@@ -27,10 +27,12 @@ class ParsedQuicPayload {
 /// =============================================================
 /// Parse decrypted QUIC payload into frames
 /// =============================================================
+
 ParsedQuicPayload parsePayload(
   Uint8List plaintextPayload,
-  QuicSession session,
-) {
+  QuicSession session, {
+  required EncryptionLevel level,
+}) {
   print('--- Parsing Decrypted QUIC Payload ---');
 
   final buffer = QuicBuffer(data: plaintextPayload);
@@ -54,20 +56,13 @@ ParsedQuicPayload parsePayload(
         print('✅ Parsed CRYPTO Frame: offset=$offset, length=$length');
 
         // ✅ Store CRYPTO chunk
-        session.cryptoChunks[offset] = cryptoData;
+        session.cryptoChunksByLevel[level]![offset] = cryptoData;
 
-        final cryptoFrame = CryptoFrame(offset: offset, data: cryptoData);
-        frames.add(cryptoFrame);
-        cryptoFrames.add(cryptoFrame);
+        final assembled = session.assembleCryptoStream(level);
 
-        // ✅ Reassemble CRYPTO stream
-        final assembled = session.assembleCryptoStream();
-
-        // ✅ ALSO record exact bytes for transcript hashing
-        session.tlsTranscript.add(assembled);
-
-        // ✅ Parse TLS only from assembled stream
+        // Append newly contiguous received TLS bytes to transcript
         if (assembled.isNotEmpty) {
+          session.tlsTranscript.add(assembled);
           tlsMessages.addAll(parseTlsMessages(assembled, quicSession: session));
         }
       }

@@ -95,6 +95,11 @@ List<TlsHandshakeMessage> parseTlsMessages(
         print("✅ Finished received (${length} bytes)");
         final fin = FinishedMessage.parse(bodyBuf);
         messages.add(fin);
+
+        // if (quicSession != null) {
+        //   quicSession.deriveApplicationSecrets();
+        // }
+
         break;
 
       default:

@@ -8,10 +8,12 @@ import 'package:hex/hex.dart';
 import 'quic_session.dart';
 
 Future<void> main() async {
+  final socket = await RawDatagramSocket.bind("127.0.0.1", 0);
+
   final quicSession = QuicSession(
     Uint8List.fromList(HEX.decode("0001020304050607")),
+    socket,
   );
-  final socket = await RawDatagramSocket.bind("127.0.0.1", 0);
   print("listening ip:${socket.address.address}:${socket.port}");
   socket.listen((ev) {
     if (ev == RawSocketEvent.read) {
