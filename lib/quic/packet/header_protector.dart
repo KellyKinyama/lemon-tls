@@ -10,6 +10,14 @@ import 'package:hex/hex.dart';
 
 import 'crypto_utils.dart';
 
+int decodeTruncatedPN(Uint8List array, int offset, int length) {
+  int val = 0;
+  for (int i = 0; i < length; i++) {
+    val = (val << 8) | array[offset + i];
+  }
+  return val;
+}
+
 /// Reverses the Header Protection mechanism, unmasking the first header byte
 /// and the Packet Number field.
 ///

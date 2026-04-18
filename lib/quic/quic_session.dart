@@ -224,6 +224,7 @@ class QUICSession {
       ],
       compressionMethods: Uint8List.fromList([0x00]),
       extensions: extensions,
+      rawData: Uint8List(0),
     );
   }
 

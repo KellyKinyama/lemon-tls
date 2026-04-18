@@ -14,12 +14,24 @@ class QuicDecryptedPacket {
   final int packetNumber;
   final bool keyPhase;
   final Uint8List? plaintext; // Null if decryption/authentication fails
+  QuicHeaderInfo? quicHeader;
 
   QuicDecryptedPacket({
     required this.packetNumber,
     required this.keyPhase,
+    this.quicHeader,
     this.plaintext,
   });
+
+  @override
+  String toString() {
+    // TODO: implement toString
+    return """QuicDecryptedPacket{
+      packetNumber: $packetNumber,
+      keyPhase: $keyPhase,
+      plaintext: ${plaintext != null ? HEX.encode(plaintext!.sublist(0, plaintext!.length < 10 ? plaintext!.length : 10)) : plaintext}
+    }""";
+  }
 }
 
 /// Parses, removes header protection, decrypts, and authenticates a QUIC packet.
@@ -63,11 +75,11 @@ QuicDecryptedPacket? decryptQuicPacketBytes(
   try {
     if (!isShort) {
       // ---------- Long Header Parsing ----------
-      final view = ByteData.view(
-        mutableArray.buffer,
-        mutableArray.offsetInBytes,
-        mutableArray.length,
-      );
+      // final view = ByteData.view(
+      //   mutableArray.buffer,
+      //   mutableArray.offsetInBytes,
+      //   mutableArray.length,
+      // );
       if (mutableArray.length < 6) throw Exception("Truncated Long Header");
 
       // Version is at offset 1 (4 bytes)
@@ -224,187 +236,363 @@ QuicDecryptedPacket? decryptQuicPacketBytes(
 ///
 /// This version automatically selects the correct key level.
 /// Keys must already be installed into the QUICSession.
-QuicDecryptedPacket? decryptQuicPacket(
-  Uint8List array,
-  QUICSession session,
-  int largestPn,
-) {
-  final mutable = Uint8List.fromList(array);
-  final firstByte = mutable[0];
-  final isLong = (firstByte & 0x80) != 0;
+// QuicDecryptedPacket? decryptQuicPacket(
+//   Uint8List array,
+//   QUICSession session,
+//   int largestPn,
+// ) {
+//   final mutable = Uint8List.fromList(array);
+//   final firstByte = mutable[0];
+//   final isLong = (firstByte & 0x80) != 0;
 
-  // -------------------------------------------------------------
-  // ✅ Detect packet encryption level
-  // -------------------------------------------------------------
-  bool isInitial = false;
-  bool isHandshake = false;
-  bool isZeroRtt = false;
-  bool isOneRtt = false;
+//   // -------------------------------------------------------------
+//   // ✅ Detect packet encryption level
+//   // -------------------------------------------------------------
+//   bool isInitial = false;
+//   bool isHandshake = false;
+//   bool isZeroRtt = false;
+//   bool isOneRtt = false;
 
-  if (isLong) {
-    final typeBits = (firstByte >> 4) & 0x03;
-    isInitial = typeBits == 0x00;
-    isZeroRtt = typeBits == 0x01;
-    isHandshake = typeBits == 0x02;
-  } else {
-    isOneRtt = true;
-  }
+//   if (isLong) {
+//     final typeBits = (firstByte >> 4) & 0x03;
+//     isInitial = typeBits == 0x00;
+//     isZeroRtt = typeBits == 0x01;
+//     isHandshake = typeBits == 0x02;
+//   } else {
+//     isOneRtt = true;
+//   }
 
-  // -------------------------------------------------------------
-  // ✅ Select read keys
-  // -------------------------------------------------------------
-  Uint8List readKey, readIv, readHp;
+//   // -------------------------------------------------------------
+//   // ✅ Select read keys
+//   // -------------------------------------------------------------
+//   Uint8List readKey, readIv, readHp;
 
-  if (isInitial) {
-    if (session.initialRead == null) return null;
-    readKey = session.initialRead!.key;
-    readIv = session.initialRead!.iv;
-    readHp = session.initialRead!.hp;
-  } else if (isHandshake) {
-    if (session.handshakeRead == null) return null;
-    readKey = session.handshakeRead!.key;
-    readIv = session.handshakeRead!.iv;
-    readHp = session.handshakeRead!.hp;
-  } else if (isOneRtt) {
-    if (session.oneRttRead == null) return null;
-    readKey = session.oneRttRead!.key;
-    readIv = session.oneRttRead!.iv;
-    readHp = session.oneRttRead!.hp;
-  } else {
-    return null;
-  }
+//   if (isInitial) {
+//     if (session.initialRead == null) return null;
+//     readKey = session.initialRead!.key;
+//     readIv = session.initialRead!.iv;
+//     readHp = session.initialRead!.hp;
+//   } else if (isHandshake) {
+//     if (session.handshakeRead == null) return null;
+//     readKey = session.handshakeRead!.key;
+//     readIv = session.handshakeRead!.iv;
+//     readHp = session.handshakeRead!.hp;
+//   } else if (isOneRtt) {
+//     if (session.oneRttRead == null) return null;
+//     readKey = session.oneRttRead!.key;
+//     readIv = session.oneRttRead!.iv;
+//     readHp = session.oneRttRead!.hp;
+//   } else {
+//     return null;
+//   }
 
-  // -------------------------------------------------------------
-  // ✅ Debug output
-  // -------------------------------------------------------------
-  print('--- decryptQuicPacket keys ---');
-  print(
-    'Level      = '
-    '${isInitial
-        ? "Initial"
-        : isHandshake
-        ? "Handshake"
-        : isOneRtt
-        ? "1‑RTT"
-        : "??"}',
-  );
-  print('READ.key   = ${HEX.encode(readKey)}');
-  print('READ.iv    = ${HEX.encode(readIv)}');
-  print('READ.hp    = ${HEX.encode(readHp)}');
-  print('pkt[0]     = 0x${array[0].toRadixString(16).padLeft(2, '0')}');
-  print('pkt.len    = ${array.length}');
+//   // -------------------------------------------------------------
+//   // ✅ Debug output
+//   // -------------------------------------------------------------
+//   print('--- decryptQuicPacket keys ---');
+//   print(
+//     'Level      = '
+//     '${isInitial
+//         ? "Initial"
+//         : isHandshake
+//         ? "Handshake"
+//         : isOneRtt
+//         ? "1‑RTT"
+//         : "??"}',
+//   );
+//   print('READ.key   = ${HEX.encode(readKey)}');
+//   print('READ.iv    = ${HEX.encode(readIv)}');
+//   print('READ.hp    = ${HEX.encode(readHp)}');
+//   print('pkt[0]     = 0x${array[0].toRadixString(16).padLeft(2, '0')}');
+//   print('pkt.len    = ${array.length}');
 
-  // -------------------------------------------------------------
-  // ✅ Header parsing
-  // -------------------------------------------------------------
-  int pnOffset = 0;
-  int pnLength = 0;
-  int? packetNumber;
-  Uint8List ciphertext, tag, aad;
-  Uint8List? nonce;
+//   // -------------------------------------------------------------
+//   // ✅ Header parsing
+//   // -------------------------------------------------------------
+//   int pnOffset = 0;
+//   int pnLength = 0;
+//   int? packetNumber;
+//   Uint8List ciphertext, tag, aad;
+//   Uint8List? nonce;
 
-  try {
-    if (isLong) {
-      int offset = 1; // flags
-      offset += 4; // version
+//   try {
+//     if (isLong) {
+//       int offset = 1; // flags
+//       offset += 4; // version
 
-      // ✅ DCID (CAPTURE IT)
-      final dcidLen = mutable[offset++];
-      final packetDcid = mutable.sublist(offset, offset + dcidLen);
-      offset += dcidLen;
+//       // ✅ DCID (CAPTURE IT)
+//       final dcidLen = mutable[offset++];
+//       final packetDcid = mutable.sublist(offset, offset + dcidLen);
+//       offset += dcidLen;
 
-      // SCID
-      final scidLen = mutable[offset++];
-      offset += scidLen;
+//       // SCID
+//       final scidLen = mutable[offset++];
+//       offset += scidLen;
 
-      // Initial token
-      final typeBits = (firstByte >> 4) & 0x03;
-      if (typeBits == 0x00) {
-        final t = readVarInt(mutable, offset)!;
-        offset += t.byteLength + t.value;
-      }
+//       // Initial token
+//       final typeBits = (firstByte >> 4) & 0x03;
+//       if (typeBits == 0x00) {
+//         final t = readVarInt(mutable, offset)!;
+//         offset += t.byteLength + t.value;
+//       }
 
-      // Length
-      final lenField = readVarInt(mutable, offset)!;
-      offset += lenField.byteLength;
-      pnOffset = offset;
+//       // Length
+//       final lenField = readVarInt(mutable, offset)!;
+//       offset += lenField.byteLength;
+//       pnOffset = offset;
 
-      // Header protection
-      pnLength = removeHeaderProtection(
-        array: mutable,
-        pnOffset: pnOffset,
-        hpKey: readHp,
-        isShort: false,
-      );
+//       // Header protection
+//       pnLength = removeHeaderProtection(
+//         array: mutable,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: false,
+//       );
 
-      packetNumber = decodeAndExpandPacketNumber(
-        mutable,
-        pnOffset,
-        pnLength,
-        largestPn,
-      );
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutable,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
 
-      nonce = computeNonce(readIv, packetNumber);
+//       nonce = computeNonce(readIv, packetNumber);
 
-      final payloadStart = pnOffset + pnLength;
-      final payloadEnd = payloadStart + (lenField.value - pnLength);
-      if (payloadEnd > mutable.length) return null;
+//       final payloadStart = pnOffset + pnLength;
+//       final payloadEnd = payloadStart + (lenField.value - pnLength);
+//       if (payloadEnd > mutable.length) return null;
 
-      final payload = mutable.sublist(payloadStart, payloadEnd);
-      if (payload.length < 16) return null;
+//       final payload = mutable.sublist(payloadStart, payloadEnd);
+//       if (payload.length < 16) return null;
 
-      ciphertext = payload.sublist(0, payload.length - 16);
-      tag = payload.sublist(payload.length - 16);
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
 
-      // ✅ AAD = header INCLUDING *packet DCID*
-      aad = mutable.sublist(0, pnOffset + pnLength);
-    } else {
-      // -----------------------------
-      // Short Header (1‑RTT)
-      // -----------------------------
-      final dcid = session.dcid;
-      pnOffset = 1 + dcid.length;
+//       // ✅ AAD = header INCLUDING *packet DCID*
+//       aad = mutable.sublist(0, pnOffset + pnLength);
+//     } else {
+//       // -----------------------------
+//       // Short Header (1‑RTT)
+//       // -----------------------------
+//       final dcid = session.dcid;
+//       pnOffset = 1 + dcid.length;
 
-      pnLength = removeHeaderProtection(
-        array: mutable,
-        pnOffset: pnOffset,
-        hpKey: readHp,
-        isShort: true,
-      );
+//       pnLength = removeHeaderProtection(
+//         array: mutable,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: true,
+//       );
 
-      packetNumber = decodeAndExpandPacketNumber(
-        mutable,
-        pnOffset,
-        pnLength,
-        largestPn,
-      );
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutable,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
 
-      nonce = computeNonce(readIv, packetNumber);
+//       nonce = computeNonce(readIv, packetNumber);
 
-      final payloadStart = pnOffset + pnLength;
-      final payload = mutable.sublist(payloadStart);
-      if (payload.length < 16) return null;
+//       final payloadStart = pnOffset + pnLength;
+//       final payload = mutable.sublist(payloadStart);
+//       if (payload.length < 16) return null;
 
-      ciphertext = payload.sublist(0, payload.length - 16);
-      tag = payload.sublist(payload.length - 16);
-      aad = mutable.sublist(0, pnOffset + pnLength);
-    }
-  } catch (_) {
-    return null;
-  }
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
+//       aad = mutable.sublist(0, pnOffset + pnLength);
+//     }
+//   } catch (_) {
+//     return null;
+//   }
 
-  // -------------------------------------------------------------
-  // ✅ AEAD decrypt
-  // -------------------------------------------------------------
-  final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce!, aad);
-  if (plaintext == null) return null;
+//   // -------------------------------------------------------------
+//   // ✅ AEAD decrypt
+//   // -------------------------------------------------------------
+//   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce!, aad);
+//   if (plaintext == null) return null;
 
-  return QuicDecryptedPacket(
-    packetNumber: packetNumber!,
-    keyPhase: false,
-    plaintext: plaintext,
-  );
-}
+//   return QuicDecryptedPacket(
+//     packetNumber: packetNumber!,
+//     keyPhase: false,
+//     plaintext: plaintext,
+//   );
+// }
+
+// QuicDecryptedPacket? decryptQuicPacketBytes2(
+//   Uint8List array,
+//   Uint8List readKey,
+//   Uint8List readIv,
+//   Uint8List readHp,
+//   Uint8List dcid,
+//   int largestPn, {
+//   bool logging = true,
+// }) {
+//   final mutable = Uint8List.fromList(array);
+//   final firstByte = mutable[0];
+//   final isLong = (firstByte & 0x80) != 0;
+
+//   bool isInitial = false;
+//   bool isHandshake = false;
+//   bool isOneRtt = false;
+
+//   late final payloadStart;
+
+//   if (isLong) {
+//     final typeBits = (firstByte >> 4) & 0x03;
+//     isInitial = typeBits == 0x00;
+//     isHandshake = typeBits == 0x02;
+//   } else {
+//     isOneRtt = true;
+//   }
+
+//   if (logging) {
+//     print('--- decryptQuicPacket keys ---');
+//     print(
+//       'Level      = ${isInitial
+//           ? "Initial"
+//           : isHandshake
+//           ? "Handshake"
+//           : "1‑RTT"}',
+//     );
+//     print('READ.key   = ${HEX.encode(readKey)}');
+//     print('READ.iv    = ${HEX.encode(readIv)}');
+//     print('READ.hp    = ${HEX.encode(readHp)}');
+//     print('dcid       = ${HEX.encode(dcid)}');
+//     print('pkt[0]     = 0x${mutable[0].toRadixString(16).padLeft(2, '0')}');
+//     print('pkt.len    = ${mutable.length}');
+//   }
+
+//   int pnOffset;
+//   int pnLength;
+//   late int packetNumber;
+//   late Uint8List ciphertext;
+//   late Uint8List tag;
+//   late Uint8List aad;
+//   late Uint8List nonce;
+
+//   try {
+//     if (isLong) {
+//       int offset = 1;
+//       offset += 4;
+
+//       final dcidLen = mutable[offset++];
+//       offset += dcidLen;
+
+//       final scidLen = mutable[offset++];
+//       offset += scidLen;
+
+//       final typeBits = (mutable[0] >> 4) & 0x03;
+//       if (typeBits == 0x00) {
+//         final t = readVarInt(mutable, offset)!;
+//         offset += t.byteLength + t.value;
+//       }
+
+//       final lenField = readVarInt(mutable, offset)!;
+//       offset += lenField.byteLength;
+//       pnOffset = offset;
+
+//       pnLength = removeHeaderProtection(
+//         array: mutable,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: false,
+//       );
+
+//       if (logging) {
+//         print("Packet number offset: $pnOffset");
+//         print("Packet number length: $pnLength");
+//       }
+
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutable,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
+
+//       nonce = computeNonce(readIv, packetNumber);
+
+//       if (logging) {
+//         print("Packet number: $packetNumber");
+//         print("Nonce: ${HEX.encode(nonce)}");
+//       }
+
+//       payloadStart = pnOffset + pnLength;
+//       final payloadEnd = payloadStart + (lenField.value - pnLength);
+//       final payload = mutable.sublist(payloadStart, payloadEnd);
+
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
+//       aad = mutable.sublist(0, payloadStart);
+//     } else {
+//       pnOffset = 1 + dcid.length;
+
+//       pnLength = removeHeaderProtection(
+//         array: mutable,
+//         pnOffset: pnOffset,
+//         hpKey: readHp,
+//         isShort: true,
+//       );
+
+//       if (logging) {
+//         print("Packet number offset: $pnOffset");
+//         print("Packet number length: $pnLength");
+//       }
+
+//       packetNumber = decodeAndExpandPacketNumber(
+//         mutable,
+//         pnOffset,
+//         pnLength,
+//         largestPn,
+//       );
+
+//       nonce = computeNonce(readIv, packetNumber);
+//       if (logging) {
+//         print("Packet number: $packetNumber");
+//         print("Nonce: ${HEX.encode(nonce)}");
+//       }
+
+//       payloadStart = pnOffset + pnLength;
+//       final payload = mutable.sublist(payloadStart);
+
+//       ciphertext = payload.sublist(0, payload.length - 16);
+//       tag = payload.sublist(payload.length - 16);
+//       aad = mutable.sublist(0, payloadStart);
+//     }
+//   } catch (e, st) {
+//     print('Decryption failed: $e');
+//     print(st);
+//     return null;
+//   }
+//   if (logging) {
+//     print("AAD (hex): ${HEX.encode(aad)}");
+//     print("Ciphertext+Tag len: ${ciphertext.length + tag.length}");
+//     print("Decrypting cipher text ...");
+//   }
+
+//   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce, aad);
+
+//   if (plaintext == null) return null;
+
+//   if (logging) {
+//     print("✅ **Payload decrypted successfully!**");
+//     print(
+//       "✅ **Recovered Message (Hex): ${HEX.encode(plaintext.sublist(0, 5))}**",
+//     );
+//   }
+
+//   QuicHeaderInfo quicHeader = QuicHeaderInfo(
+//     header: mutable.sublist(payloadStart),
+//     packetNumberOffset: pnOffset,
+//   );
+
+//   return QuicDecryptedPacket(
+//     packetNumber: packetNumber,
+//     keyPhase: false,
+//     quicHeader: quicHeader,
+//     plaintext: plaintext,
+//   );
+// }
 
 QuicDecryptedPacket? decryptQuicPacketBytes2(
   Uint8List array,
@@ -412,38 +600,22 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
   Uint8List readIv,
   Uint8List readHp,
   Uint8List dcid,
-  int largestPn,
-) {
+  int largestPn, {
+  bool logging = true,
+}) {
   final mutable = Uint8List.fromList(array);
   final firstByte = mutable[0];
   final isLong = (firstByte & 0x80) != 0;
 
-  bool isInitial = false;
-  bool isHandshake = false;
-  bool isOneRtt = false;
-
-  if (isLong) {
-    final typeBits = (firstByte >> 4) & 0x03;
-    isInitial = typeBits == 0x00;
-    isHandshake = typeBits == 0x02;
-  } else {
-    isOneRtt = true;
+  if (logging) {
+    print('--- decryptQuicPacket keys ---');
+    print('READ.key = ${HEX.encode(readKey)}');
+    print('READ.iv  = ${HEX.encode(readIv)}');
+    print('READ.hp  = ${HEX.encode(readHp)}');
+    print('dcid     = ${HEX.encode(dcid)}');
+    print('pkt[0]   = 0x${firstByte.toRadixString(16).padLeft(2, '0')}');
+    print('pkt.len  = ${mutable.length}');
   }
-
-  print('--- decryptQuicPacket keys ---');
-  print(
-    'Level      = ${isInitial
-        ? "Initial"
-        : isHandshake
-        ? "Handshake"
-        : "1‑RTT"}',
-  );
-  print('READ.key   = ${HEX.encode(readKey)}');
-  print('READ.iv    = ${HEX.encode(readIv)}');
-  print('READ.hp    = ${HEX.encode(readHp)}');
-  print('dcid       = ${HEX.encode(dcid)}');
-  print('pkt[0]     = 0x${mutable[0].toRadixString(16).padLeft(2, '0')}');
-  print('pkt.len    = ${mutable.length}');
 
   int pnOffset;
   int pnLength;
@@ -455,8 +627,9 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
 
   try {
     if (isLong) {
-      int offset = 1;
-      offset += 4;
+      // ---- Long Header ----
+      int offset = 1; // first byte
+      offset += 4; // version
 
       final dcidLen = mutable[offset++];
       offset += dcidLen;
@@ -466,14 +639,17 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
 
       final typeBits = (mutable[0] >> 4) & 0x03;
       if (typeBits == 0x00) {
+        // Initial → token
         final t = readVarInt(mutable, offset)!;
         offset += t.byteLength + t.value;
       }
 
+      // Length field
       final lenField = readVarInt(mutable, offset)!;
       offset += lenField.byteLength;
       pnOffset = offset;
 
+      // ---- Header Protection ----
       pnLength = removeHeaderProtection(
         array: mutable,
         pnOffset: pnOffset,
@@ -481,8 +657,19 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
         isShort: false,
       );
 
-      print("Packet number offset: $pnOffset");
-      print("Packet number length: $pnLength");
+      // ✅ sanity check
+      if (pnLength < 1 || pnLength > 4) {
+        throw StateError('Invalid PN length: $pnLength');
+      }
+
+      // ✅ LOG unmasked first byte
+      if (logging) {
+        print(
+          'Unmasked first byte: 0x${mutable[0].toRadixString(16).padLeft(2, '0')}',
+        );
+        print('Packet number offset: $pnOffset');
+        print('Packet number length: $pnLength');
+      }
 
       packetNumber = decodeAndExpandPacketNumber(
         mutable,
@@ -493,17 +680,33 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
 
       nonce = computeNonce(readIv, packetNumber);
 
-      print("Packet number: $packetNumber");
-      print("Nonce: ${HEX.encode(nonce)}");
+      if (logging) {
+        print('Packet number: $packetNumber');
+        print('Nonce: ${HEX.encode(nonce)}');
+      }
 
+      // ---- Payload bounds (RFC‑correct) ----
       final payloadStart = pnOffset + pnLength;
-      final payloadEnd = payloadStart + (lenField.value - pnLength);
+      final payloadLength = lenField.value - pnLength;
+      final payloadEnd = payloadStart + payloadLength;
+
+      if (payloadEnd > mutable.length) {
+        throw StateError('Truncated packet payload');
+      }
+
       final payload = mutable.sublist(payloadStart, payloadEnd);
+
+      if (payload.length < 16) {
+        throw StateError('Encrypted payload too short');
+      }
 
       ciphertext = payload.sublist(0, payload.length - 16);
       tag = payload.sublist(payload.length - 16);
+
+      // ✅ AAD = header + PN (after HP removal)
       aad = mutable.sublist(0, payloadStart);
     } else {
+      // ---- Short Header (1‑RTT) ----
       pnOffset = 1 + dcid.length;
 
       pnLength = removeHeaderProtection(
@@ -513,8 +716,17 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
         isShort: true,
       );
 
-      print("Packet number offset: $pnOffset");
-      print("Packet number length: $pnLength");
+      if (pnLength < 1 || pnLength > 4) {
+        throw StateError('Invalid PN length: $pnLength');
+      }
+
+      if (logging) {
+        print(
+          'Unmasked first byte: 0x${mutable[0].toRadixString(16).padLeft(2, '0')}',
+        );
+        print('Packet number offset: $pnOffset');
+        print('Packet number length: $pnLength');
+      }
 
       packetNumber = decodeAndExpandPacketNumber(
         mutable,
@@ -525,11 +737,17 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
 
       nonce = computeNonce(readIv, packetNumber);
 
-      print("Packet number: $packetNumber");
-      print("Nonce: ${HEX.encode(nonce)}");
+      if (logging) {
+        print('Packet number: $packetNumber');
+        print('Nonce: ${HEX.encode(nonce)}');
+      }
 
       final payloadStart = pnOffset + pnLength;
       final payload = mutable.sublist(payloadStart);
+
+      if (payload.length < 16) {
+        throw StateError('Encrypted payload too short');
+      }
 
       ciphertext = payload.sublist(0, payload.length - 16);
       tag = payload.sublist(payload.length - 16);
@@ -541,16 +759,21 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
     return null;
   }
 
-  print("AAD (hex): ${HEX.encode(aad)}");
-  print("Ciphertext+Tag len: ${ciphertext.length + tag.length}");
-  print("Decrypting cipher text ...");
+  if (logging) {
+    print('AAD (hex): ${HEX.encode(aad)}');
+    print('Ciphertext+Tag len: ${ciphertext.length + tag.length}');
+    print('Decrypting cipher text ...');
+  }
 
   final plaintext = aesGcmDecrypt(ciphertext, tag, readKey, nonce, aad);
-
   if (plaintext == null) return null;
 
-  print("✅ **Payload decrypted successfully!**");
-  print("✅ **Recovered Message (Hex): ${HEX.encode(plaintext)}**");
+  if (logging) {
+    print('✅ Payload decrypted successfully!');
+    print(
+      '✅ Recovered Message (Hex): ${HEX.encode(plaintext.take(16).toList())}',
+    );
+  }
 
   return QuicDecryptedPacket(
     packetNumber: packetNumber,
@@ -569,6 +792,29 @@ int decodeAndExpandPacketNumber(
   return expandPacketNumber(truncated, pnLength, largestReceived);
 }
 
+// int decodeAndExpandPacketNumber(
+//   Uint8List array,
+//   int offset,
+//   int pnLength,
+//   int largestReceived,
+// ) {
+//   final truncated = decodeTruncatedPN(array, offset, pnLength);
+
+//   final pnWindow = 1 << (pnLength * 8);
+//   final pnHalf = pnWindow >> 1;
+//   final expected = largestReceived + 1;
+
+//   int candidate = (expected & ~(pnWindow - 1)) | truncated;
+
+//   if (candidate <= expected - pnHalf) {
+//     candidate += pnWindow;
+//   } else if (candidate > expected + pnHalf) {
+//     candidate -= pnWindow;
+//   }
+
+//   return candidate;
+// }
+
 /// Decodes a truncated Packet Number from the byte array.
 int decodePacketNumber(Uint8List array, int offset, int pnLength) {
   int value = 0;
@@ -582,20 +828,52 @@ int decodePacketNumber(Uint8List array, int offset, int pnLength) {
 /// Expands the truncated Packet Number based on the largest previously received.
 ///
 /// Corresponds to RFC 9000, Section 17.1.
+// int expandPacketNumber(int truncated, int pnLen, int largestReceived) {
+//   final pnWin = 1 << (pnLen * 8);
+//   final pnHalf = pnWin >> 1;
+//   final expected = largestReceived + 1;
+
+//   // The logic to find the closest value:
+//   // 1. Calculate the value of the expected packet number with the current window: `expected & ~(pnWin - 1)`
+//   // 2. Adjust it by adding the truncated value: `(expected & ~(pnWin - 1)) | truncated`
+//   // 3. Find which value (current window or next window) is closest to `expected`.
+
+//   // Dart version of the JavaScript math:
+//   // return truncated + pnWin * Math.floor((expected - truncated + pnHalf) / pnWin);
+//   return truncated +
+//       (pnWin * ((expected - truncated + pnHalf) / pnWin).floor());
+// }
+
+// int expandPacketNumber(int truncated, int pnLen, int largestReceived) {
+//   final pnWindow = 1 << (pnLen * 8);
+//   final pnHalf = pnWindow >> 1;
+//   final expected = largestReceived + 1;
+
+//   int candidate = (expected & ~(pnWindow - 1)) | truncated;
+
+//   if (candidate <= expected - pnHalf) {
+//     candidate += pnWindow;
+//   } else if (candidate > expected + pnHalf) {
+//     candidate -= pnWindow;
+//   }
+
+//   return candidate;
+// }
+
 int expandPacketNumber(int truncated, int pnLen, int largestReceived) {
-  final pnWin = 1 << (pnLen * 8);
-  final pnHalf = pnWin >> 1;
+  final pnWindow = 1 << (pnLen * 8);
+  final pnHalf = pnWindow >> 1;
   final expected = largestReceived + 1;
 
-  // The logic to find the closest value:
-  // 1. Calculate the value of the expected packet number with the current window: `expected & ~(pnWin - 1)`
-  // 2. Adjust it by adding the truncated value: `(expected & ~(pnWin - 1)) | truncated`
-  // 3. Find which value (current window or next window) is closest to `expected`.
+  int candidate = (expected & ~(pnWindow - 1)) | truncated;
 
-  // Dart version of the JavaScript math:
-  // return truncated + pnWin * Math.floor((expected - truncated + pnHalf) / pnWin);
-  return truncated +
-      (pnWin * ((expected - truncated + pnHalf) / pnWin).floor());
+  if (candidate <= expected - pnHalf) {
+    candidate += pnWindow;
+  } else if (candidate > expected + pnHalf) {
+    candidate -= pnWindow;
+  }
+
+  return candidate;
 }
 
 // /// Encrypts a QUIC packet and applies Header Protection.

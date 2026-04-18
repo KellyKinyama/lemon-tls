@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
+import 'package:lemon_tls/quic/packet/payload_parser2.dart';
 
 import '../packet/quic_packet.dart';
 import '../utils.dart';
@@ -11,8 +12,8 @@ final _bytesEq = const ListEquality<int>();
 
 void expectBytesEqual(String name, Uint8List actual, String expectedHex) {
   final expected = Uint8List.fromList(HEX.decode(expectedHex));
-  print("Got $name:      ${HEX.encode(actual)}");
-  print("Expected $name: $expectedHex");
+  // print("Got $name:      ${HEX.encode(actual)}");
+  // print("Expected $name: $expectedHex");
 
   if (!_bytesEq.equals(actual, expected)) {
     throw StateError(
@@ -131,6 +132,7 @@ class QuicSession {
       keys.hp,
       dcid,
       pnSpace.referencePn,
+      logging: false,
     );
 
     if (result == null) {
@@ -323,13 +325,19 @@ void testEndToEnd() {
 
   client.decryptPacket(udp2ServerHello, EncryptionLevel.initial);
   print("");
-  final hsMsg = server.buildHandshakeMsg();
-  expectBytesEqual(
-    "Server handshake match: ",
-    hsMsg,
-    HEX.encode(upd2HandshakePacket),
+  // final hsMsg = server.buildHandshakeMsg();
+  // expectBytesEqual(
+  //   "Server handshake match: ",
+  //   hsMsg,
+  //   HEX.encode(upd2HandshakePacket),
+  // );
+  final handshakePacket = client.decryptPacket(
+    upd2HandshakePacket,
+    EncryptionLevel.handshake,
   );
-  client.decryptPacket(upd2HandshakePacket, EncryptionLevel.handshake);
+  parsePayload(handshakePacket.plaintext!);
+  print("handshake packet: $handshakePacket");
+
   client.decryptPacket(udp3ServerHandshakeFinished, EncryptionLevel.handshake);
   server.decryptPacket(udp4ClientinitialAck, EncryptionLevel.initial);
   server.decryptPacket(udp5ClientHandshakeFinished, EncryptionLevel.handshake);

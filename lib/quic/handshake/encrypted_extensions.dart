@@ -61,5 +61,5 @@ class EncryptedExtensions extends TlsHandshakeMessage {
   }
 
   @override
-  String toString() => "✅ EncryptedExtensions(${extensions.length} extensions)";
+  String toString() => "✅ EncryptedExtensions(${extensions} extensions)";
 }

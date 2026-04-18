@@ -4,16 +4,24 @@ import 'package:lemon_tls/quic/handshake/tls_messages.dart';
 
 import '../buffer.dart';
 import '../frames/quic_frames.dart';
-import '../quic_session.dart';
+import 'quic_session.dart';
 
 /// =============================================================
 /// Parsed QUIC payload result
 /// =============================================================
 class ParsedQuicPayload {
   final List<QuicFrame> frames;
+  List<CryptoFrame> cryptoFrames = [];
   final AckFrame? ack;
 
-  ParsedQuicPayload({required this.frames, this.ack});
+  List<TlsHandshakeMessage> tlsMessages;
+
+  ParsedQuicPayload({
+    required this.frames,
+    this.ack,
+    required this.cryptoFrames,
+    required this.tlsMessages,
+  });
 }
 
 /// =============================================================
@@ -21,12 +29,14 @@ class ParsedQuicPayload {
 /// =============================================================
 ParsedQuicPayload parsePayload(
   Uint8List plaintextPayload,
-  QUICSession session,
+  QuicSession session,
 ) {
   print('--- Parsing Decrypted QUIC Payload ---');
 
   final buffer = QuicBuffer(data: plaintextPayload);
   final frames = <QuicFrame>[];
+  final cryptoFrames = <CryptoFrame>[];
+  final tlsMessages = <TlsHandshakeMessage>[];
   AckFrame? ackFrame;
 
   try {
@@ -43,8 +53,23 @@ ParsedQuicPayload parsePayload(
 
         print('✅ Parsed CRYPTO Frame: offset=$offset, length=$length');
 
-        frames.add(CryptoFrame(offset: offset, data: cryptoData));
-        parseTlsMessages(cryptoData);
+        // ✅ Store CRYPTO chunk
+        session.cryptoChunks[offset] = cryptoData;
+
+        final cryptoFrame = CryptoFrame(offset: offset, data: cryptoData);
+        frames.add(cryptoFrame);
+        cryptoFrames.add(cryptoFrame);
+
+        // ✅ Reassemble CRYPTO stream
+        final assembled = session.assembleCryptoStream();
+
+        // ✅ ALSO record exact bytes for transcript hashing
+        session.tlsTranscript.add(assembled);
+
+        // ✅ Parse TLS only from assembled stream
+        if (assembled.isNotEmpty) {
+          tlsMessages.addAll(parseTlsMessages(assembled, quicSession: session));
+        }
       }
       // =========================================================
       // ✅ ACK frame (0x02)
@@ -80,7 +105,6 @@ ParsedQuicPayload parsePayload(
           ecn: ecn,
         );
 
-        print(ackFrame);
         frames.add(ackFrame);
       }
       // =========================================================
@@ -96,5 +120,10 @@ ParsedQuicPayload parsePayload(
 
   print('\n🎉 Payload parsing complete.');
 
-  return ParsedQuicPayload(frames: frames, ack: ackFrame);
+  return ParsedQuicPayload(
+    frames: frames,
+    cryptoFrames: cryptoFrames,
+    ack: ackFrame,
+    tlsMessages: tlsMessages,
+  );
 }

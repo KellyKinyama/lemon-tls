@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:hex/hex.dart';
+import 'package:lemon_tls/quic/quic_learn/quic_session.dart';
 
 import '../buffer.dart';
 import 'client_hello.dart';
@@ -38,7 +39,10 @@ class TlsExtension {
   String toString() => '  - Ext: $typeName, Length: ${data.length}';
 }
 
-List<TlsHandshakeMessage> parseTlsMessages(Uint8List cryptoData) {
+List<TlsHandshakeMessage> parseTlsMessages(
+  Uint8List cryptoData, {
+  QuicSession? quicSession,
+}) {
   final buffer = QuicBuffer(data: cryptoData);
   final messages = <TlsHandshakeMessage>[];
 
@@ -61,12 +65,17 @@ List<TlsHandshakeMessage> parseTlsMessages(Uint8List cryptoData) {
       case 0x02: // ServerHello
         print("✅ ServerHello received (${length} bytes)");
         final sh = ServerHello.parse(bodyBuf);
+        if (quicSession != null) {
+          quicSession.encryptionLevel = EncryptionLevel.handshake;
+          quicSession.receivedServello = sh;
+        }
         messages.add(sh);
         break;
 
       case 0x08: // Encrypted Extensions
         print("✅ EncryptedExtensions received (${length} bytes)");
         final ee = EncryptedExtensions.parse(bodyBuf);
+        print("ee: $ee");
         messages.add(ee);
         break;
 

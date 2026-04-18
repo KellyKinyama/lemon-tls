@@ -34,6 +34,8 @@ class ClientHello extends TlsHandshakeMessage {
   Uint8List? preSharedKey;
   Uint8List? renegotiationInfo;
   Uint8List? quicTransportParametersRaw;
+
+  Uint8List rawData;
   ClientHello({
     required this.legacyVersion,
     required this.sessionId,
@@ -55,6 +57,7 @@ class ClientHello extends TlsHandshakeMessage {
     this.preSharedKey,
     this.renegotiationInfo,
     this.quicTransportParametersRaw,
+    required this.rawData,
   }) : super(0x01);
 
   @override
@@ -332,6 +335,7 @@ class ClientHello extends TlsHandshakeMessage {
       cipherSuites: cipher_suites,
       compressionMethods: compression_methods,
       extensions: extensions,
+      rawData: body,
     );
   }
 
@@ -580,6 +584,7 @@ ClientHello parseClientHelloBody(QuicBuffer buffer) {
     cipherSuites: cipherSuites,
     compressionMethods: compressionMethods,
     extensions: extensions,
+    rawData: buffer.data.sublist(buffer.readOffset),
   );
 }
 
