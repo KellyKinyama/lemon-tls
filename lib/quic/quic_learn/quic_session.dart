@@ -234,7 +234,7 @@ class QuicSession {
     final finishedBytes = finishedHandshake.toBytes();
 
     // IMPORTANT: append Finished to transcript AFTER computing verify_data
-    tlsTranscript.add(finishedBytes);
+    // tlsTranscript.add(finishedBytes);
 
     // =====================================================
     // 5. Wrap in CRYPTO frame (using your helper)

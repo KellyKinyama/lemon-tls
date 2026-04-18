@@ -124,3 +124,82 @@ class ServerHello extends TlsHandshakeMessage {
 ''';
   }
 }
+
+Uint8List buildServerHello({
+  required Uint8List serverRandom,
+  required Uint8List publicKey,
+  required Uint8List sessionId,
+  required int cipherSuite,
+  required int group,
+}) {
+  final out = BytesBuilder();
+
+  // --------------------------------------------------
+  // Handshake body
+  // --------------------------------------------------
+  final body = BytesBuilder();
+
+  // legacy_version = 0x0303
+  body.add([0x03, 0x03]);
+
+  // random (32 bytes)
+  body.add(serverRandom);
+
+  // legacy_session_id_echo
+  body.addByte(sessionId.length & 0xff);
+  body.add(sessionId);
+
+  // cipher_suite
+  body.add([(cipherSuite >> 8) & 0xff, cipherSuite & 0xff]);
+
+  // legacy_compression_method = 0x00
+  body.addByte(0x00);
+
+  // --------------------------------------------------
+  // Extensions
+  // --------------------------------------------------
+  final extensions = BytesBuilder();
+
+  // supported_versions extension
+  // type = 0x002b, len = 0x0002, value = 0x0304
+  extensions.add([0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]);
+
+  // key_share extension
+  final keyShareBody = BytesBuilder()
+    ..add([(group >> 8) & 0xff, group & 0xff])
+    ..add([(publicKey.length >> 8) & 0xff, publicKey.length & 0xff])
+    ..add(publicKey);
+
+  final keyShareBytes = keyShareBody.toBytes();
+
+  extensions.add([
+    0x00, 0x33, // extension type
+    (keyShareBytes.length >> 8) & 0xff,
+    keyShareBytes.length & 0xff,
+    ...keyShareBytes,
+  ]);
+
+  final extBytes = extensions.toBytes();
+
+  // extensions length
+  body.add([(extBytes.length >> 8) & 0xff, extBytes.length & 0xff]);
+
+  body.add(extBytes);
+
+  final bodyBytes = body.toBytes();
+
+  // --------------------------------------------------
+  // Handshake wrapper
+  // type = 0x02 (ServerHello)
+  // length = uint24
+  // --------------------------------------------------
+  out.addByte(0x02);
+  out.add([
+    (bodyBytes.length >> 16) & 0xff,
+    (bodyBytes.length >> 8) & 0xff,
+    bodyBytes.length & 0xff,
+  ]);
+  out.add(bodyBytes);
+
+  return out.toBytes();
+}
