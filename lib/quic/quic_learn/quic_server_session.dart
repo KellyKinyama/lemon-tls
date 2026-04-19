@@ -295,20 +295,65 @@ class QuicServerSession {
   // Public entry point
   // ============================================================
 
+  // void handleDatagram(Uint8List pkt) {
+  //   final packetLevel = detectPacketLevel(pkt);
+  //   print("📥 Server received packet level=$packetLevel len=${pkt.length}");
+
+  //   if (!initialKeysReady) {
+  //     _deriveInitialKeysFromFirstPacket(pkt);
+  //   }
+
+  //   final decrypted = decryptPacket(pkt, packetLevel);
+  //   _onDecryptedPacket(decrypted, packetLevel);
+
+  //   _parsePayload(decrypted.plaintext!, packetLevel);
+  // }
+
   void handleDatagram(Uint8List pkt) {
     final packetLevel = detectPacketLevel(pkt);
     print("📥 Server received packet level=$packetLevel len=${pkt.length}");
 
+    // --------------------------------------------------
+    // 1. Initial keys must ONLY be derived from Initial packets
+    // --------------------------------------------------
     if (!initialKeysReady) {
+      if (packetLevel != EncryptionLevel.initial) {
+        // QUIC rule: ignore non‑Initial packets until Initial keys exist
+        print("ℹ️ Ignoring non-Initial packet before initial keys are ready");
+        return;
+      }
       _deriveInitialKeysFromFirstPacket(pkt);
     }
 
+    // --------------------------------------------------
+    // 2. QUIC tolerance: ignore packets we cannot yet decrypt
+    // --------------------------------------------------
+    if (packetLevel == EncryptionLevel.handshake && handshakeRead == null) {
+      print("ℹ️ Ignoring early Handshake packet (handshake keys not ready)");
+      return;
+    }
+
+    if (packetLevel == EncryptionLevel.application &&
+        !applicationSecretsDerived) {
+      print("ℹ️ Ignoring early Application packet (1-RTT keys not ready)");
+      return;
+    }
+
+    // --------------------------------------------------
+    // 3. Decrypt packet
+    // --------------------------------------------------
     final decrypted = decryptPacket(pkt, packetLevel);
+
+    // --------------------------------------------------
+    // 4. ACK handling and packet number tracking
+    // --------------------------------------------------
     _onDecryptedPacket(decrypted, packetLevel);
 
+    // --------------------------------------------------
+    // 5. Parse decrypted payload
+    // --------------------------------------------------
     _parsePayload(decrypted.plaintext!, packetLevel);
   }
-
   // ============================================================
   // Level detection
   // ============================================================
@@ -477,7 +522,7 @@ class QuicServerSession {
 
     if (level == EncryptionLevel.initial ||
         level == EncryptionLevel.handshake) {
-      sendAck(level: level);
+      // sendAck(level: level);
     }
   }
 
@@ -906,6 +951,12 @@ class QuicServerSession {
   }
 
   void _sendServerHandshakeFlight() {
+    // --------------------------------------------------
+    // Preconditions
+    // --------------------------------------------------
+    if (initialWrite == null) {
+      throw StateError("Initial write keys not ready");
+    }
     if (handshakeWrite == null) {
       throw StateError("Handshake write keys not ready");
     }
@@ -914,21 +965,18 @@ class QuicServerSession {
     }
 
     // --------------------------------------------------
-    // 1. Transcript up to (but not including) Finished
+    // 1. Build TLS Finished
     // --------------------------------------------------
     final handshakeBeforeFinished = Uint8List.fromList([
-      ...clientHelloMsg!, // ClientHello
-      ...serverHelloMsg!, // ServerHello
-      ...encryptedExtensions, // EncryptedExtensions
-      ...certificate, // Certificate
-      ...certificateVerify, // CertificateVerify
+      ...clientHelloMsg!,
+      ...serverHelloMsg!,
+      ...encryptedExtensions,
+      ...certificate,
+      ...certificateVerify,
     ]);
 
     final transcriptHash = createHash(handshakeBeforeFinished);
 
-    // --------------------------------------------------
-    // 2. Compute server Finished verify_data
-    // --------------------------------------------------
     final serverFinishedKey = hkdfExpandLabel(
       secret: serverHsTrafficSecret,
       label: "finished",
@@ -949,63 +997,75 @@ class QuicServerSession {
     print("✅ Server built Finished verify_data=${HEX.encode(verifyData)}");
 
     // --------------------------------------------------
-    // 3. Full server handshake flight (server-only messages)
+    // 2. Send ServerHello in INITIAL packet
     // --------------------------------------------------
-    final fullFlight = Uint8List.fromList([
-      ...serverHelloMsg!, // ServerHello
-      ...encryptedExtensions,
-      ...certificate,
-      ...certificateVerify,
-      ...serverFinishedBytes!,
-    ]);
-
-    // --------------------------------------------------
-    // 4. Save transcript through Server Finished
-    // --------------------------------------------------
-    transcriptThroughServerFinishedBytes = Uint8List.fromList([
-      ...clientHelloMsg!,
-      ...fullFlight,
-    ]);
-
-    // --------------------------------------------------
-    // 5. Send flight as CRYPTO frames (Handshake level)
-    // --------------------------------------------------
-    const maxChunk = 1000;
-    int offset = 0;
-
-    while (offset < fullFlight.length) {
-      final end = (offset + maxChunk < fullFlight.length)
-          ? offset + maxChunk
-          : fullFlight.length;
-
-      final chunk = fullFlight.sublist(offset, end);
-      final cryptoPayload = buildCryptoFrameAt(offset, chunk);
-      final pn = _allocateSendPn(EncryptionLevel.handshake);
+    {
+      final crypto = buildCryptoFrameAt(0, serverHelloMsg!);
+      final pn = _allocateSendPn(EncryptionLevel.initial);
 
       final raw = encryptQuicPacket(
-        "handshake",
-        cryptoPayload,
-        handshakeWrite!.key,
-        handshakeWrite!.iv,
-        handshakeWrite!.hp,
+        "initial",
+        crypto,
+        initialWrite!.key,
+        initialWrite!.iv,
+        initialWrite!.hp,
         pn,
-        serverCid,
-        clientOrigDcid,
+        serverCid, // SCID (server)
+        peerScid, // DCID (client)
         Uint8List(0),
       );
 
       if (raw == null) {
-        throw StateError("Failed to encrypt server handshake flight packet");
+        throw StateError("Failed to encrypt Initial ServerHello");
       }
 
       socket.send(raw, peerAddress, peerPort);
+      print("✅ Server sent Initial(ServerHello) pn=$pn");
+    }
 
-      print(
-        "✅ Server sent Handshake packet pn=$pn offset=$offset len=${chunk.length}",
+    // --------------------------------------------------
+    // 3. Send each remaining handshake message
+    //    in its own Handshake packet
+    // --------------------------------------------------
+    int offset = serverHelloMsg!.length;
+
+    void sendHandshake(Uint8List msg) {
+      final crypto = buildCryptoFrameAt(offset, msg);
+      final pn = _allocateSendPn(EncryptionLevel.handshake);
+
+      final raw = encryptQuicPacket(
+        "handshake",
+        crypto,
+        handshakeWrite!.key,
+        handshakeWrite!.iv,
+        handshakeWrite!.hp,
+        pn,
+        serverCid, // SCID
+        peerScid, // DCID
+        Uint8List(0),
       );
 
-      offset = end;
+      if (raw == null) {
+        throw StateError("Failed to encrypt Handshake packet");
+      }
+
+      socket.send(raw, peerAddress, peerPort);
+      print("✅ Server sent Handshake pn=$pn offset=$offset len=${msg.length}");
+
+      offset += msg.length;
     }
+
+    // EncryptedExtensions
+    sendHandshake(encryptedExtensions);
+
+    // Certificate
+    sendHandshake(certificate);
+
+    // CertificateVerify
+    sendHandshake(certificateVerify);
+
+    // Finished
+    sendHandshake(serverFinishedBytes!);
   }
 
   // ============================================================
