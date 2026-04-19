@@ -1,16 +1,86 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:collection/collection.dart';
 import 'package:collection/equality.dart';
 import 'package:hex/hex.dart';
-import 'package:lemon_tls/quic/quic_session.dart';
-import 'package:lemon_tls/tls13/server_hello.dart';
 
 import '../buffer.dart';
-// import '../packet/payload_parser.dart';
 import 'keyshare.dart';
 import 'tls_messages.dart';
+
+// =============================================================
+// ALPN helpers
+// =============================================================
+
+Uint8List buildAlpnExtensionData(List<String> protocols) {
+  final listBody = BytesBuilder();
+
+  for (final proto in protocols) {
+    final bytes = Uint8List.fromList(utf8.encode(proto));
+    if (bytes.isEmpty || bytes.length > 255) {
+      throw ArgumentError('Invalid ALPN protocol length for "$proto"');
+    }
+    listBody.addByte(bytes.length);
+    listBody.add(bytes);
+  }
+
+  final listBytes = listBody.toBytes();
+
+  return Uint8List.fromList([
+    (listBytes.length >> 8) & 0xFF,
+    listBytes.length & 0xFF,
+    ...listBytes,
+  ]);
+}
+
+List<String> parseAlpnExtensionData(Uint8List data) {
+  final buf = QuicBuffer(data: data);
+  final protocols = <String>[];
+
+  if (buf.remaining < 2) return protocols;
+
+  final listLen = buf.pullUint16();
+  final end = buf.readOffset + listLen;
+
+  while (buf.readOffset < end && buf.remaining > 0) {
+    final nameLen = buf.pullUint8();
+    if (buf.remaining < nameLen) {
+      throw StateError('ALPN extension truncated');
+    }
+    final nameBytes = buf.pullBytes(nameLen);
+    protocols.add(utf8.decode(nameBytes, allowMalformed: true));
+  }
+
+  return protocols;
+}
+
+// =============================================================
+// Generic TLS extensions parser
+// =============================================================
+
+List<TlsExtension> parseExtensions(QuicBuffer buffer) {
+  if (buffer.remaining < 2) return [];
+
+  final totalExtLen = buffer.pullUint16();
+  final extensions = <TlsExtension>[];
+  int extensionsRead = 0;
+
+  while (extensionsRead < totalExtLen && buffer.remaining > 0) {
+    final extType = buffer.pullUint16();
+    final extLen = buffer.pullUint16();
+    final extData = buffer.pullBytes(extLen);
+
+    extensions.add(TlsExtension(type: extType, length: extLen, data: extData));
+
+    extensionsRead += 4 + extLen;
+  }
+
+  return extensions;
+}
+
+// =============================================================
+// ClientHello
+// =============================================================
 
 class ClientHello extends TlsHandshakeMessage {
   int legacyVersion;
@@ -20,22 +90,23 @@ class ClientHello extends TlsHandshakeMessage {
   Uint8List compressionMethods;
   final List<TlsExtension> extensions;
 
-  // Parsed Extension Variables
+  // Parsed extension variables
   String? sni;
-  List<ParsedKeyShare>? keyShares = [];
-  List<int>? supportedVersions = [];
-  List<int>? supportedGroups = [];
-  List<int>? signatureAlgorithms = [];
-  List<String>? alpn = [];
+  List<ParsedKeyShare>? keyShares;
+  List<int>? supportedVersions;
+  List<int>? supportedGroups;
+  List<int>? signatureAlgorithms;
+  List<String>? alpn;
   int? maxFragmentLength;
   Uint8List? padding;
   Uint8List? cookie;
-  List<int>? pskKeyExchangeModes = [];
+  List<int>? pskKeyExchangeModes;
   Uint8List? preSharedKey;
   Uint8List? renegotiationInfo;
   Uint8List? quicTransportParametersRaw;
 
-  Uint8List rawData;
+  final Uint8List rawData;
+
   ClientHello({
     required this.legacyVersion,
     required this.sessionId,
@@ -43,7 +114,7 @@ class ClientHello extends TlsHandshakeMessage {
     required this.cipherSuites,
     required this.compressionMethods,
     required this.extensions,
-    required String type,
+    required String type, // kept for compatibility with existing call sites
     this.sni,
     this.keyShares,
     this.supportedVersions,
@@ -60,49 +131,97 @@ class ClientHello extends TlsHandshakeMessage {
     required this.rawData,
   }) : super(0x01);
 
+  // ------------------------------------------------------------
+  // Convenience ALPN accessors
+  // ------------------------------------------------------------
+
+  List<String> get alpnProtocols => alpn ?? <String>[];
+
+  set alpnProtocols(List<String> value) {
+    alpn = value;
+  }
+
+  /// Replace or insert the ALPN extension (0x0010) based on [alpn].
+  void upsertAlpnExtension() {
+    final protocols = alpn ?? <String>[];
+
+    // Remove ALPN extension if empty
+    if (protocols.isEmpty) {
+      extensions.removeWhere((e) => e.type == 0x0010);
+      return;
+    }
+
+    final extData = buildAlpnExtensionData(protocols);
+    final idx = extensions.indexWhere((e) => e.type == 0x0010);
+
+    final ext = TlsExtension(
+      type: 0x0010,
+      length: extData.length,
+      data: extData,
+    );
+
+    if (idx >= 0) {
+      extensions[idx] = ext;
+    } else {
+      extensions.add(ext);
+    }
+  }
+
   @override
   String toString() {
     final suites = cipherSuites
         .map((s) => cipherSuitesMap[s] ?? 'Unknown (0x${s.toRadixString(16)})')
         .join(',\n    ');
+
     return '''
 ✅ Parsed ClientHello (Type 0x01):
+- Legacy Version: 0x${legacyVersion.toRadixString(16)}
 - Random: ${HEX.encode(random.sublist(0, 8))}...
+- Session ID: ${HEX.encode(sessionId)}
 - Cipher Suites:
     $suites
-- Key share: $keyShares
-- Extensions Count: ${extensions.map((extension) {
-      return extensionTypesMap[extension.type] != null ? (extensionTypesMap[extension.type], HEX.encode(extension.data)) : (extension.type, HEX.encode(extension.data));
-    })}''';
+- Supported Versions: ${supportedVersions ?? []}
+- Supported Groups: ${supportedGroups ?? []}
+- Signature Algorithms: ${signatureAlgorithms ?? []}
+- ALPN: ${alpn ?? []}
+- Key Share: ${keyShares ?? []}
+- Extensions Count: ${extensions.length}
+''';
   }
 
+  // ------------------------------------------------------------
+  // Full handshake serialization (header + body)
+  // ------------------------------------------------------------
+
   Uint8List serialize() {
+    // Ensure ALPN extension reflects semantic field
+    upsertAlpnExtension();
+
     final body = QuicBuffer();
 
-    // 1. legacy_version: Always 0x0303 (TLS 1.2) for compatibility
-    body.pushUint16(0x0303);
+    // 1. legacy_version
+    body.pushUint16(legacyVersion);
 
-    // 2. random: 32 bytes
+    // 2. random
     body.pushBytes(random);
 
-    // 3. legacy_session_id: Encoded as a vector (Length byte + data)
-    // For QUIC, this is typically empty (0 length)
-    body.pushUint8(0);
+    // 3. legacy_session_id
+    body.pushUint8(sessionId.length);
+    body.pushBytes(sessionId);
 
-    // 4. cipher_suites: Encoded as a vector (2-byte length + suite IDs)
+    // 4. cipher_suites
     body.pushUint16(cipherSuites.length * 2);
-    for (var suite in cipherSuites) {
+    for (final suite in cipherSuites) {
       body.pushUint16(suite);
     }
 
-    // 5. legacy_compression_methods: Encoded as a vector (1-byte length + data)
-    // Standard is 1 method: null (0x00)
-    body.pushUint8(1);
-    body.pushUint8(0);
+    // 5. legacy_compression_methods
+    body.pushUint8(compressionMethods.length);
+    body.pushBytes(compressionMethods);
 
-    // 6. extensions: Encoded as a vector (2-byte length + extensions)
+    // 6. extensions
     final extBuffer = QuicBuffer();
-    for (var ext in extensions) {
+    for (final ext in extensions) {
       extBuffer.pushUint16(ext.type);
       extBuffer.pushUint16(ext.data.length);
       extBuffer.pushBytes(ext.data);
@@ -112,12 +231,11 @@ class ClientHello extends TlsHandshakeMessage {
     body.pushUint16(extBytes.length);
     body.pushBytes(extBytes);
 
-    // 7. Handshake Header: Type (1 byte) + Length (3 bytes)
     final bodyBytes = body.toBytes();
-    final header = Uint8List(4);
-    header[0] = 0x01; // ClientHello Type
 
-    // Set 24-bit length (Big Endian)
+    // 7. Handshake header
+    final header = Uint8List(4);
+    header[0] = 0x01; // ClientHello
     header[1] = (bodyBytes.length >> 16) & 0xFF;
     header[2] = (bodyBytes.length >> 8) & 0xFF;
     header[3] = bodyBytes.length & 0xFF;
@@ -125,63 +243,87 @@ class ClientHello extends TlsHandshakeMessage {
     return Uint8List.fromList([...header, ...bodyBytes]);
   }
 
+  // ------------------------------------------------------------
+  // Parse ClientHello body (without handshake header)
+  // ------------------------------------------------------------
+
   static ClientHello parse_tls_client_hello(Uint8List body) {
     final view = body;
     int ptr = 0;
 
-    int legacy_version = (view[ptr++] << 8) | view[ptr++];
-    Uint8List random = view.sublist(ptr, ptr + 32);
+    final legacyVersion = (view[ptr++] << 8) | view[ptr++];
+    final random = view.sublist(ptr, ptr + 32);
     ptr += 32;
-    int session_id_len = view[ptr++];
-    Uint8List session_id = view.sublist(ptr, ptr + session_id_len);
-    ptr += session_id_len;
 
-    int cipher_suites_len = (view[ptr++] << 8) | view[ptr++];
-    List<int> cipher_suites = [];
-    for (var i = 0; i < cipher_suites_len; i += 2) {
-      int code = (view[ptr++] << 8) | view[ptr++];
-      cipher_suites.add(code);
+    final sessionIdLen = view[ptr++];
+    final sessionId = view.sublist(ptr, ptr + sessionIdLen);
+    ptr += sessionIdLen;
+
+    final cipherSuitesLen = (view[ptr++] << 8) | view[ptr++];
+    final cipherSuites = <int>[];
+    for (int i = 0; i < cipherSuitesLen; i += 2) {
+      final code = (view[ptr++] << 8) | view[ptr++];
+      cipherSuites.add(code);
     }
-    print("parsed length: $ptr");
 
-    int compression_methods_len = view[ptr++];
-    Uint8List compression_methods = view.sublist(
-      ptr,
-      ptr + compression_methods_len,
-    );
-    ptr += compression_methods_len;
+    final compressionMethodsLen = view[ptr++];
+    final compressionMethods = view.sublist(ptr, ptr + compressionMethodsLen);
+    ptr += compressionMethodsLen;
 
-    var extensions_len = (view[ptr++] << 8) | view[ptr++];
-    List<TlsExtension> extensions = [];
-    var ext_end = ptr + extensions_len;
-    while (ptr < ext_end) {
-      int ext_type = (view[ptr++] << 8) | view[ptr++];
-      int ext_len = (view[ptr++] << 8) | view[ptr++];
-      Uint8List ext_data = view.sublist(ptr, ptr + ext_len);
-      ptr += ext_len;
+    final extensionsLen = (view[ptr++] << 8) | view[ptr++];
+    final extensions = <TlsExtension>[];
+    final extEnd = ptr + extensionsLen;
+
+    while (ptr < extEnd) {
+      final extType = (view[ptr++] << 8) | view[ptr++];
+      final extLen = (view[ptr++] << 8) | view[ptr++];
+      final extData = view.sublist(ptr, ptr + extLen);
+      ptr += extLen;
+
       extensions.add(
-        TlsExtension(type: ext_type, length: ext_len, data: ext_data),
+        TlsExtension(type: extType, length: extLen, data: extData),
       );
     }
 
-    // --------------------------------------------------
-    // Decode extensions (NO byte re-parsing)
-    // --------------------------------------------------
-
-    // --------------------------------------------------
-    // ✅ Semantic decode (iterate over TlsExtension)
-    // --------------------------------------------------
+    // ----------------------------------------------------------
+    // Semantic decoding
+    // ----------------------------------------------------------
+    String? sni;
     final keyShares = <ParsedKeyShare>[];
     final supportedGroups = <int>[];
     final supportedVersions = <int>[];
+    final signatureAlgorithms = <int>[];
+    final alpnProtocols = <String>[];
+    Uint8List? cookie;
+    List<int>? pskKeyExchangeModes;
+    Uint8List? quicTransportParametersRaw;
 
     for (final ext in extensions) {
       final buf = QuicBuffer(data: ext.data);
 
       switch (ext.type) {
-        // --------------------------------------------
+        // ------------------------------------------------------
+        // server_name (0x0000)
+        // ------------------------------------------------------
+        case 0x0000:
+          if (buf.remaining < 2) break;
+          final listLen = buf.pullUint16();
+          final end = buf.readOffset + listLen;
+
+          while (buf.readOffset < end && buf.remaining > 0) {
+            final nameType = buf.pullUint8();
+            final nameLen = buf.pullUint16();
+            final nameBytes = buf.pullBytes(nameLen);
+
+            if (nameType == 0x00) {
+              sni = utf8.decode(nameBytes, allowMalformed: true);
+            }
+          }
+          break;
+
+        // ------------------------------------------------------
         // supported_groups (0x000a)
-        // --------------------------------------------
+        // ------------------------------------------------------
         case 0x000a:
           final len = buf.pullUint16();
           for (int i = 0; i < len; i += 2) {
@@ -189,9 +331,47 @@ class ClientHello extends TlsHandshakeMessage {
           }
           break;
 
-        // --------------------------------------------
+        // ------------------------------------------------------
+        // signature_algorithms (0x000d)
+        // ------------------------------------------------------
+        case 0x000d:
+          final len = buf.pullUint16();
+          for (int i = 0; i < len; i += 2) {
+            signatureAlgorithms.add(buf.pullUint16());
+          }
+          break;
+
+        // ------------------------------------------------------
+        // ALPN (0x0010)
+        // ------------------------------------------------------
+        case 0x0010:
+          alpnProtocols.addAll(parseAlpnExtensionData(ext.data));
+          break;
+
+        // ------------------------------------------------------
+        // cookie (0x002c)
+        // ------------------------------------------------------
+        case 0x002c:
+          if (buf.remaining < 2) break;
+          final len = buf.pullUint16();
+          cookie = buf.pullBytes(len);
+          break;
+
+        // ------------------------------------------------------
+        // psk_key_exchange_modes (0x002d)
+        // ------------------------------------------------------
+        case 0x002d:
+          if (buf.remaining < 1) break;
+          final len = buf.pullUint8();
+          pskKeyExchangeModes = <int>[];
+          for (int i = 0; i < len; i++) {
+            pskKeyExchangeModes.add(buf.pullUint8());
+          }
+          break;
+
+        // ------------------------------------------------------
         // supported_versions (0x002b)
-        // --------------------------------------------
+        // ------------------------------------------------------
         case 0x002b:
           final len = buf.pullUint8();
           for (int i = 0; i < len; i += 2) {
@@ -199,9 +379,9 @@ class ClientHello extends TlsHandshakeMessage {
           }
           break;
 
-        // --------------------------------------------
+        // ------------------------------------------------------
         // key_share (0x0033)
-        // --------------------------------------------
+        // ------------------------------------------------------
         case 0x0033:
           final listLen = buf.pullUint16();
           final end = buf.readOffset + listLen;
@@ -214,6 +394,13 @@ class ClientHello extends TlsHandshakeMessage {
           }
           break;
 
+        // ------------------------------------------------------
+        // QUIC transport parameters (0x0039)
+        // ------------------------------------------------------
+        case 0x0039:
+          quicTransportParametersRaw = ext.data;
+          break;
+
         default:
           break;
       }
@@ -221,183 +408,144 @@ class ClientHello extends TlsHandshakeMessage {
 
     return ClientHello(
       type: 'client_hello',
-      legacyVersion: legacy_version,
+      legacyVersion: legacyVersion,
       random: random,
-      sessionId: session_id,
-      cipherSuites: cipher_suites,
-      compressionMethods: compression_methods,
+      sessionId: sessionId,
+      cipherSuites: cipherSuites,
+      compressionMethods: compressionMethods,
       extensions: extensions,
       rawData: body,
-
-      // ✅ populated from extension decoding
+      sni: sni,
       keyShares: keyShares,
       supportedGroups: supportedGroups,
       supportedVersions: supportedVersions,
+      signatureAlgorithms: signatureAlgorithms,
+      alpn: alpnProtocols,
+      cookie: cookie,
+      pskKeyExchangeModes: pskKeyExchangeModes,
+      quicTransportParametersRaw: quicTransportParametersRaw,
     );
   }
 
+  // ------------------------------------------------------------
+  // Body-only builder (without handshake header)
+  // ------------------------------------------------------------
+
   Uint8List build_tls_client_hello() {
+    upsertAlpnExtension();
+
     final buffer = QuicBuffer();
 
-    // Legacy Version (usually 0x0303 for TLS 1.2 compatibility)
+    // Legacy Version
     buffer.pushUint16(legacyVersion);
 
-    // Random (32 bytes)
+    // Random
     buffer.pushBytes(random);
 
     // Session ID
     buffer.pushUint8(sessionId.length);
     buffer.pushBytes(sessionId);
 
-    // Cipher Suites
-    buffer.pushUint16(cipherSuites.length);
-    for (int cipherSuite in cipherSuites) {
+    // Cipher Suites (length in bytes)
+    buffer.pushUint16(cipherSuites.length * 2);
+    for (final cipherSuite in cipherSuites) {
       buffer.pushUint16(cipherSuite);
     }
 
     // Compression Methods
     buffer.pushUint8(compressionMethods.length);
-
     buffer.pushBytes(compressionMethods);
 
     // Extensions
-    buffer.pushUint16(extensions.length);
-
-    for (var extension in extensions) {
-      buffer.pushUint16(extension.type);
-      buffer.pushUint16(extension.length);
-      buffer.pushBytes(extension.data);
+    final extBuffer = QuicBuffer();
+    for (final extension in extensions) {
+      extBuffer.pushUint16(extension.type);
+      extBuffer.pushUint16(extension.data.length);
+      extBuffer.pushBytes(extension.data);
     }
 
-    final bodyBytes = buffer.data.sublist(0, buffer.writeIndex);
-    return bodyBytes;
+    final extBytes = extBuffer.toBytes();
+    buffer.pushUint16(extBytes.length);
+    buffer.pushBytes(extBytes);
 
-    // final header = Uint8List(4);
-    // header[0] = 0x01; // ClientHello Type
-
-    // // Set 24-bit length (Big Endian)
-    // header[1] = (bodyBytes.length >> 16) & 0xFF;
-    // header[2] = (bodyBytes.length >> 8) & 0xFF;
-    // header[3] = bodyBytes.length & 0xFF;
-
-    // return Uint8List.fromList([...header, ...bodyBytes]);
+    return buffer.toBytes();
   }
+
+  // ------------------------------------------------------------
+  // Full handshake builder (same as serialize)
+  // ------------------------------------------------------------
 
   Uint8List build_tls_client_hello2() {
-    var view = BytesBuilder();
-
-    // Legacy Version
-    view.add([(legacyVersion >> 8) & 0xFF, legacyVersion & 0xFF]);
-
-    // Random
-    view.add(random);
-
-    // Session ID
-    view.addByte(sessionId.length);
-    view.add(sessionId);
-
-    // ✅ Cipher suites length (bytes)
-    int cipherBytes = cipherSuites.length * 2;
-    view.add([(cipherBytes >> 8) & 0xFF, cipherBytes & 0xFF]);
-
-    for (int suite in cipherSuites) {
-      view.add([(suite >> 8) & 0xFF, suite & 0xFF]);
-    }
-
-    // Compression Methods
-    view.addByte(compressionMethods.length);
-    view.add(compressionMethods);
-
-    // ✅ Extensions length in bytes
-    int extLen = extensions.fold(0, (sum, e) => sum + 4 + e.length);
-    view.add([(extLen >> 8) & 0xFF, extLen & 0xFF]);
-
-    for (final ext in extensions) {
-      view.add([(ext.type >> 8) & 0xFF, ext.type & 0xFF]);
-      view.add([(ext.length >> 8) & 0xFF, ext.length & 0xFF]);
-      view.add(ext.data);
-    }
-
-    final bodyBytes = view.toBytes();
-
-    final header = Uint8List(4);
-    header[0] = 0x01; // ClientHello Type
-
-    // Set 24-bit length (Big Endian)
-    header[1] = (bodyBytes.length >> 16) & 0xFF;
-    header[2] = (bodyBytes.length >> 8) & 0xFF;
-    header[3] = bodyBytes.length & 0xFF;
-
-    return Uint8List.fromList([...header, ...bodyBytes]);
+    return serialize();
   }
 
-  // #############################################################################
-  // ## SECTION 3: PARSER LOGIC
-  // #############################################################################
+  // ------------------------------------------------------------
+  // Instance helper
+  // ------------------------------------------------------------
 
   List<TlsExtension> parseExtensions(QuicBuffer buffer) {
-    if (buffer.remaining < 2) return [];
-    final totalExtLen = buffer.pullUint16();
-    final extensions = <TlsExtension>[];
-    int extensionsRead = 0;
-    while (extensionsRead < totalExtLen && buffer.remaining > 0) {
-      final extType = buffer.pullUint16();
-      final extLen = buffer.pullUint16();
-      final extData = buffer.pullBytes(extLen);
-      extensions.add(
-        TlsExtension(type: extType, length: extLen, data: extData),
-      );
-      extensionsRead += 4 + extLen;
-    }
-    return extensions;
+    return parseExtensionsTop(buffer);
   }
 }
 
+// =============================================================
+// Standalone helpers
+// =============================================================
+
 ClientHello parseClientHelloBody(QuicBuffer buffer) {
-  int legacyVersion = buffer.pullUint16(); // Skip legacy_version
-  final random = buffer.pullBytes(32);
-  Uint8List sessionId = buffer.pullVector(1); // Skip legacy_session_id
+  final start = buffer.readOffset;
+  final body = buffer.pullBytes(buffer.remaining);
 
-  final cipherSuitesBytes = buffer.pullVector(2);
-  final cipherSuites = <int>[];
-  final csBuffer = QuicBuffer(data: cipherSuitesBytes);
-  while (!csBuffer.eof) {
-    cipherSuites.add(csBuffer.pullUint16());
-  }
+  final ch = ClientHello.parse_tls_client_hello(body);
 
-  Uint8List compressionMethods = buffer.pullVector(
-    1,
-  ); // Skip legacy_compression_methods
-  final extensions = parseExtensions(buffer);
-
-  // throw UnimplementedError("ClientHello");
-
+  // rawData should be exact body bytes
   return ClientHello(
     type: 'client_hello',
-    legacyVersion: legacyVersion,
-    random: random,
-    sessionId: sessionId,
-    cipherSuites: cipherSuites,
-    compressionMethods: compressionMethods,
-    extensions: extensions,
-    rawData: buffer.data.sublist(buffer.readOffset),
+    legacyVersion: ch.legacyVersion,
+    random: ch.random,
+    sessionId: ch.sessionId,
+    cipherSuites: ch.cipherSuites,
+    compressionMethods: ch.compressionMethods,
+    extensions: ch.extensions,
+    rawData: buffer.data.sublist(start, start + body.length),
+    sni: ch.sni,
+    keyShares: ch.keyShares,
+    supportedVersions: ch.supportedVersions,
+    supportedGroups: ch.supportedGroups,
+    signatureAlgorithms: ch.signatureAlgorithms,
+    alpn: ch.alpn,
+    maxFragmentLength: ch.maxFragmentLength,
+    padding: ch.padding,
+    cookie: ch.cookie,
+    pskKeyExchangeModes: ch.pskKeyExchangeModes,
+    preSharedKey: ch.preSharedKey,
+    renegotiationInfo: ch.renegotiationInfo,
+    quicTransportParametersRaw: ch.quicTransportParametersRaw,
   );
 }
 
-List<TlsExtension> parseExtensions(QuicBuffer buffer) {
+List<TlsExtension> parseExtensionsTop(QuicBuffer buffer) {
   if (buffer.remaining < 2) return [];
   final totalExtLen = buffer.pullUint16();
   final extensions = <TlsExtension>[];
   int extensionsRead = 0;
+
   while (extensionsRead < totalExtLen && buffer.remaining > 0) {
     final extType = buffer.pullUint16();
     final extLen = buffer.pullUint16();
     final extData = buffer.pullBytes(extLen);
+
     extensions.add(TlsExtension(type: extType, length: extLen, data: extData));
+
     extensionsRead += 4 + extLen;
   }
+
   return extensions;
 }
+
+// =============================================================
+// Demo / round-trip test
+// =============================================================
 
 final clientHello = Uint8List.fromList(
   HEX.decode(

@@ -49,9 +49,79 @@ const int tpInitialMaxStreamDataBidiLocal = 0x0005;
 const int tpInitialMaxStreamDataBidiRemote = 0x0006;
 const int tpInitialMaxStreamsBidi = 0x0008;
 const int tpIdleTimeout = 0x0001;
+// QUIC transport parameter IDs (RFC 9000)
+const int tpOriginalDestinationConnectionId = 0x0000;
+// const int tpIdleTimeout = 0x0001;
+const int tpMaxUdpPayloadSize = 0x0003;
+// const int tpInitialMaxData = 0x0004;
+// const int tpInitialMaxStreamDataBidiLocal = 0x0005;
+// const int tpInitialMaxStreamDataBidiRemote = 0x0006;
+const int tpInitialMaxStreamDataUni = 0x0007;
+// const int tpInitialMaxStreamsBidi = 0x0008;
+const int tpInitialMaxStreamsUni = 0x0009;
+const int tpActiveConnectionIdLimit = 0x000e;
+const int tpInitialSourceConnectionId = 0x000f;
 // =============================================================
 // Helper types
 // =============================================================
+
+// =============================================================
+// ALPN
+// =============================================================
+
+// Modern HTTP/3 ALPN
+// const String alpnH3 = 'h3';
+// const String alpnQuicEchoExample = 'quic-echo-example';
+
+// Older draft ALPNs (optional, only if your client really offers them)
+// const String alpnH3_29 = 'h3-29';
+// const String alpnH3_32 = 'h3-32';
+
+// Your custom protocol (keep only if you still test your own toy client)
+// const String alpnPing = 'ping/1.0';
+
+/// Server preference order.
+/// The first match with the client's offered ALPNs wins.
+// const List<String> supportedAlpnProtocols = [
+//   alpnH3,
+//   alpnQuicEchoExample,
+//   alpnH3_32,
+//   alpnH3_29,
+//   alpnPing,
+// ];
+
+// =============================================================
+// ALPN
+// =============================================================
+
+const String alpnQuicEchoExample = 'quic-echo-example';
+const String alpnH3 = 'h3';
+const String alpnH3_32 = 'h3-32';
+const String alpnH3_29 = 'h3-29';
+const String alpnPing = 'ping/1.0';
+
+/// Server preference order.
+/// The first match with the client's offered ALPNs wins.
+const List<String> supportedAlpnProtocols = [
+  alpnQuicEchoExample,
+  alpnH3,
+  alpnH3_32,
+  alpnH3_29,
+  alpnPing,
+];
+
+String chooseServerAlpn(List<String> clientOffered) {
+  for (final supported in supportedAlpnProtocols) {
+    if (clientOffered.contains(supported)) {
+      return supported;
+    }
+  }
+
+  throw StateError(
+    'No compatible ALPN. Client offered: $clientOffered, '
+    'server supports: $supportedAlpnProtocols',
+  );
+}
 
 class BuiltExtension {
   final int type;
@@ -131,13 +201,46 @@ Uint8List _tp(int id, int value) {
 }
 
 /// ✅ Minimal but VALID server transport parameters
-Uint8List buildQuicTransportParameters() {
+// Uint8List buildQuicTransportParameters() {
+//   return Uint8List.fromList([
+//     ..._tp(tpIdleTimeout, 30),
+//     ..._tp(tpInitialMaxData, 1 << 20),
+//     ..._tp(tpInitialMaxStreamDataBidiLocal, 1 << 18),
+//     ..._tp(tpInitialMaxStreamDataBidiRemote, 1 << 18),
+//     ..._tp(tpInitialMaxStreamsBidi, 16),
+//   ]);
+// }
+
+Uint8List buildQuicTransportParameters({
+  required Uint8List originalDestinationConnectionId,
+  required Uint8List initialSourceConnectionId,
+}) {
   return Uint8List.fromList([
+    // ----------------------------------------------------------
+    // Required / expected for a QUIC server
+    // ----------------------------------------------------------
+    ..._tpBytes(
+      tpOriginalDestinationConnectionId,
+      originalDestinationConnectionId,
+    ),
+    ..._tpBytes(tpInitialSourceConnectionId, initialSourceConnectionId),
+
+    // ----------------------------------------------------------
+    // Strongly recommended transport parameters
+    // ----------------------------------------------------------
+    ..._tp(tpActiveConnectionIdLimit, 4),
     ..._tp(tpIdleTimeout, 30),
+    ..._tp(tpMaxUdpPayloadSize, 65527),
+
+    // ----------------------------------------------------------
+    // Flow control / stream limits
+    // ----------------------------------------------------------
     ..._tp(tpInitialMaxData, 1 << 20),
     ..._tp(tpInitialMaxStreamDataBidiLocal, 1 << 18),
     ..._tp(tpInitialMaxStreamDataBidiRemote, 1 << 18),
+    ..._tp(tpInitialMaxStreamDataUni, 1 << 18),
     ..._tp(tpInitialMaxStreamsBidi, 16),
+    ..._tp(tpInitialMaxStreamsUni, 16),
   ]);
 }
 
@@ -201,9 +304,29 @@ Uint8List buildQuicTransportParameters() {
 // EncryptedExtensions
 // =============================================================
 
+// Uint8List buildAlpnExt(String protocol) {
+//   final p = Uint8List.fromList(utf8.encode(protocol));
+//   return Uint8List.fromList([0x00, p.length + 1, p.length, ...p]);
+// }
+
 Uint8List buildAlpnExt(String protocol) {
   final p = Uint8List.fromList(utf8.encode(protocol));
-  return Uint8List.fromList([0x00, p.length + 1, p.length, ...p]);
+
+  // ALPN extension payload format:
+  //   ProtocolNameList length (2 bytes)
+  //   ProtocolName length (1 byte)
+  //   ProtocolName bytes
+  //
+  // Since the server MUST select exactly one protocol,
+  // ProtocolNameList contains exactly one entry.
+  final listLen = 1 + p.length;
+
+  return Uint8List.fromList([
+    (listLen >> 8) & 0xff,
+    listLen & 0xff,
+    p.length,
+    ...p,
+  ]);
 }
 
 Uint8List buildEncryptedExtensions(List<BuiltExtension> extensions) {
@@ -275,37 +398,109 @@ Uint8List buildCertificate(List<CertificateEntry> certificates) {
   ]);
 }
 
+// Uint8List _tls13CertificateVerifyInput({
+//   required String contextString,
+//   required Uint8List transcriptHash,
+// }) {
+//   // TLS 1.3 CertificateVerify input:
+//   // 64 bytes of 0x20, then context string, then 0x00, then transcript hash
+//   final spaces = Uint8List.fromList(List<int>.filled(64, 0x20));
+//   final context = Uint8List.fromList(utf8.encode(contextString));
+
+//   return Uint8List.fromList([...spaces, ...context, 0x00, ...transcriptHash]);
+// }
+
+// Uint8List _encodeAsn1Integer(Uint8List bytes) {
+//   // Strip leading zeros
+//   int i = 0;
+//   while (i < bytes.length - 1 && bytes[i] == 0x00) {
+//     i++;
+//   }
+//   Uint8List v = bytes.sublist(i);
+
+//   // If top bit is set, prefix 0x00 to keep INTEGER positive
+//   if (v.isNotEmpty && (v[0] & 0x80) != 0) {
+//     v = Uint8List.fromList([0x00, ...v]);
+//   }
+
+//   return Uint8List.fromList([
+//     0x02, // INTEGER
+//     v.length,
+//     ...v,
+//   ]);
+// }
+
+// Uint8List _derEncodeEcdsaSignature(Uint8List rawSig) {
+//   // Expect raw r || s for P-256 => 64 bytes
+//   if (rawSig.length != 64) {
+//     throw StateError(
+//       'Expected raw ECDSA signature of 64 bytes (r||s), got ${rawSig.length}',
+//     );
+//   }
+
+//   final r = rawSig.sublist(0, 32);
+//   final s = rawSig.sublist(32, 64);
+
+//   final rDer = _encodeAsn1Integer(r);
+//   final sDer = _encodeAsn1Integer(s);
+
+//   final seqBody = Uint8List.fromList([...rDer, ...sDer]);
+
+//   return Uint8List.fromList([
+//     0x30, // SEQUENCE
+//     seqBody.length,
+//     ...seqBody,
+//   ]);
+// }
+
+// Uint8List _ensureDerEncodedEcdsaSignature(Uint8List sig) {
+//   // If it's already DER, leave it alone
+//   if (sig.isNotEmpty && sig[0] == 0x30) {
+//     return sig;
+//   }
+
+//   // Otherwise assume raw r||s and convert
+//   return _derEncodeEcdsaSignature(sig);
+// }
 // =============================================================
 // CertificateVerify (ECDSA)
 // =============================================================
 
-Uint8List buildServerCertificateVerify({
-  required EcdsaCert cert,
-  required Uint8List transcriptHash,
-}) {
-  final context = utf8.encode('TLS 1.3, server CertificateVerify');
-  final padding = Uint8List(64);
+// Uint8List buildServerCertificateVerify({
+//   required EcdsaCert cert,
+//   required Uint8List transcriptHash,
+// }) {
+//   final context = utf8.encode('TLS 1.3, server CertificateVerify');
+//   final padding = Uint8List(64);
 
-  final toBeSigned = Uint8List.fromList([
-    ...context,
-    ...padding,
-    ...transcriptHash,
-  ]);
+//   final toBeSigned = Uint8List.fromList([
+//     ...context,
+//     ...padding,
+//     ...transcriptHash,
+//   ]);
 
-  final hash = crypto.sha256.convert(toBeSigned).bytes;
-  final signature = ecdsaSign(hash, cert.privateKey);
-  final totalLen = 4 + signature.length;
+//   final hash = crypto.sha256.convert(toBeSigned).bytes;
+//   final signature = ecdsaSign(hash, cert.privateKey);
+//   final totalLen = 4 + signature.length;
 
+//   return Uint8List.fromList([
+//     0x0f,
+//     (totalLen >> 16) & 0xff,
+//     (totalLen >> 8) & 0xff,
+//     totalLen & 0xff,
+//     (ecdsaP256Sha256 >> 8) & 0xff,
+//     ecdsaP256Sha256 & 0xff,
+//     (signature.length >> 8) & 0xff,
+//     signature.length & 0xff,
+//     ...signature,
+//   ]);
+// }
+
+Uint8List _tpBytes(int id, Uint8List value) {
   return Uint8List.fromList([
-    0x0f,
-    (totalLen >> 16) & 0xff,
-    (totalLen >> 8) & 0xff,
-    totalLen & 0xff,
-    (ecdsaP256Sha256 >> 8) & 0xff,
-    ecdsaP256Sha256 & 0xff,
-    (signature.length >> 8) & 0xff,
-    signature.length & 0xff,
-    ...signature,
+    ..._encodeVarInt(id),
+    ..._encodeVarInt(value.length),
+    ...value,
   ]);
 }
 
@@ -313,12 +508,188 @@ Uint8List buildServerCertificateVerify({
 // One‑shot helper used by QuicServerSession
 // =============================================================
 
+// ServerHandshakeArtifacts buildServerHandshakeArtifacts({
+//   required Uint8List serverRandom,
+//   required Uint8List serverPublicKey,
+//   required EcdsaCert serverCert,
+//   required Uint8List transcriptHashBeforeCertVerify,
+
+//   // REQUIRED for correct QUIC server transport parameters
+//   required Uint8List originalDestinationConnectionId,
+//   required Uint8List initialSourceConnectionId,
+
+//   // For your quic-go example client
+//   String alpnProtocol = alpnQuicEchoExample,
+// }) {
+//   final sh = buildServerHello(
+//     serverRandom: serverRandom,
+//     publicKey: serverPublicKey,
+//     sessionId: Uint8List(0),
+//     cipherSuite: tlsAes128GcmSha256,
+//     group: x25519Group,
+//   );
+
+//   final ee = buildEncryptedExtensions([
+//     BuiltExtension(type: 0x0010, data: buildAlpnExt(alpnProtocol)),
+//     BuiltExtension(
+//       type: 0x0039,
+//       data: buildQuicTransportParameters(
+//         originalDestinationConnectionId: originalDestinationConnectionId,
+//         initialSourceConnectionId: initialSourceConnectionId,
+//       ),
+//     ),
+//   ]);
+
+//   final cert = buildCertificate([CertificateEntry(cert: serverCert.cert)]);
+
+//   final cv = buildServerCertificateVerify(
+//     cert: serverCert,
+//     transcriptHash: transcriptHashBeforeCertVerify,
+//   );
+
+//   return ServerHandshakeArtifacts(
+//     serverHello: sh,
+//     encryptedExtensions: ee,
+//     certificate: cert,
+//     certificateVerify: cv,
+//   );
+// }
+
+// =============================================================
+// TLS 1.3 CertificateVerify helpers
+// Put these in tls_server_handshake.dart
+// =============================================================
+
+Uint8List _tls13CertificateVerifyInput({
+  required String contextString,
+  required Uint8List transcriptHash,
+}) {
+  // TLS 1.3 CertificateVerify input:
+  // 64 bytes of 0x20, then context string, then 0x00, then transcript hash
+  final spaces = Uint8List.fromList(List<int>.filled(64, 0x20));
+  final context = Uint8List.fromList(utf8.encode(contextString));
+
+  return Uint8List.fromList([...spaces, ...context, 0x00, ...transcriptHash]);
+}
+
+Uint8List _encodeAsn1Integer(Uint8List bytes) {
+  // Strip leading zeros
+  int i = 0;
+  while (i < bytes.length - 1 && bytes[i] == 0x00) {
+    i++;
+  }
+  Uint8List v = bytes.sublist(i);
+
+  // If the high bit is set, prefix 0x00 so ASN.1 INTEGER stays positive
+  if (v.isNotEmpty && (v[0] & 0x80) != 0) {
+    v = Uint8List.fromList([0x00, ...v]);
+  }
+
+  return Uint8List.fromList([
+    0x02, // INTEGER
+    v.length,
+    ...v,
+  ]);
+}
+
+Uint8List _derEncodeEcdsaSignature(Uint8List rawSig) {
+  // Expect raw P-256 signature: 32-byte r || 32-byte s
+  if (rawSig.length != 64) {
+    throw StateError(
+      'Expected raw ECDSA signature of 64 bytes (r||s), got ${rawSig.length}',
+    );
+  }
+
+  final r = rawSig.sublist(0, 32);
+  final s = rawSig.sublist(32, 64);
+
+  final rDer = _encodeAsn1Integer(r);
+  final sDer = _encodeAsn1Integer(s);
+
+  final seqBody = Uint8List.fromList([...rDer, ...sDer]);
+
+  return Uint8List.fromList([
+    0x30, // SEQUENCE
+    seqBody.length,
+    ...seqBody,
+  ]);
+}
+
+Uint8List _ensureDerEncodedEcdsaSignature(Uint8List sig) {
+  // If already ASN.1 DER SEQUENCE, keep it
+  if (sig.isNotEmpty && sig[0] == 0x30) {
+    return sig;
+  }
+
+  // Otherwise assume raw r||s and convert
+  return _derEncodeEcdsaSignature(sig);
+}
+
+// =============================================================
+// CertificateVerify (PATCHED)
+// Put this in tls_server_handshake.dart
+// =============================================================
+
+Uint8List buildServerCertificateVerify({
+  required EcdsaCert cert,
+  required Uint8List transcriptHash,
+}) {
+  // TLS 1.3 server CertificateVerify context string
+  const contextString = 'TLS 1.3, server CertificateVerify';
+
+  final toBeSigned = _tls13CertificateVerifyInput(
+    contextString: contextString,
+    transcriptHash: transcriptHash,
+  );
+
+  // For ecdsa_secp256r1_sha256, sign SHA-256 over the CertificateVerify input
+  final hash = crypto.sha256.convert(toBeSigned).bytes;
+
+  Uint8List signature = Uint8List.fromList(ecdsaSign(cert.privateKey, hash));
+
+  // TLS requires ASN.1 DER encoding for ECDSA signatures
+  signature = _ensureDerEncodedEcdsaSignature(signature);
+
+  final bodyLen = 2 + 2 + signature.length;
+
+  return Uint8List.fromList([
+    0x0f, // HandshakeType.certificate_verify
+    (bodyLen >> 16) & 0xff,
+    (bodyLen >> 8) & 0xff,
+    bodyLen & 0xff,
+
+    // signature_algorithm = ecdsa_secp256r1_sha256
+    (ecdsaP256Sha256 >> 8) & 0xff,
+    ecdsaP256Sha256 & 0xff,
+
+    // signature vector length
+    (signature.length >> 8) & 0xff,
+    signature.length & 0xff,
+
+    ...signature,
+  ]);
+}
+
+// =============================================================
+// One-shot server handshake artifact builder (PATCHED)
+// Put this in tls_server_handshake.dart
+// =============================================================
+
 ServerHandshakeArtifacts buildServerHandshakeArtifacts({
   required Uint8List serverRandom,
   required Uint8List serverPublicKey,
   required EcdsaCert serverCert,
-  required Uint8List transcriptHashBeforeCertVerify,
-  String alpnProtocol = 'ping/1.0',
+
+  /// Prefix up to and including ServerHello:
+  /// ClientHello || ServerHello
+  required Uint8List transcriptPrefixBeforeCertVerify,
+
+  // REQUIRED for correct QUIC server transport parameters
+  required Uint8List originalDestinationConnectionId,
+  required Uint8List initialSourceConnectionId,
+
+  // For quic-go example client
+  String alpnProtocol = alpnQuicEchoExample,
 }) {
   final sh = buildServerHello(
     serverRandom: serverRandom,
@@ -330,10 +701,22 @@ ServerHandshakeArtifacts buildServerHandshakeArtifacts({
 
   final ee = buildEncryptedExtensions([
     BuiltExtension(type: 0x0010, data: buildAlpnExt(alpnProtocol)),
-    BuiltExtension(type: 0x0039, data: buildQuicTransportParameters()),
+    BuiltExtension(
+      type: 0x0039,
+      data: buildQuicTransportParameters(
+        originalDestinationConnectionId: originalDestinationConnectionId,
+        initialSourceConnectionId: initialSourceConnectionId,
+      ),
+    ),
   ]);
 
   final cert = buildCertificate([CertificateEntry(cert: serverCert.cert)]);
+
+  // TLS 1.3 CertificateVerify signs over:
+  // ClientHello || ServerHello || EncryptedExtensions || Certificate
+  final transcriptHashBeforeCertVerify = createHash(
+    Uint8List.fromList([...transcriptPrefixBeforeCertVerify, ...ee, ...cert]),
+  );
 
   final cv = buildServerCertificateVerify(
     cert: serverCert,
@@ -349,28 +732,33 @@ ServerHandshakeArtifacts buildServerHandshakeArtifacts({
 }
 
 // =============================================================
+// _maybeHandleClientHello() (PATCHED)
+// Put this in quic_server_session.dart
+// =============================================================
+
+// =============================================================
 // Demo main (runnable)
 // =============================================================
 
-void main() {
-  final keyPair = KeyPair.generate();
-  final serverCert = generateSelfSignedCertificate();
+// void main() {
+//   final keyPair = KeyPair.generate();
+//   final serverCert = generateSelfSignedCertificate();
 
-  final serverRandom = Uint8List.fromList(
-    List.generate(32, (_) => math.Random.secure().nextInt(256)),
-  );
+//   final serverRandom = Uint8List.fromList(
+//     List.generate(32, (_) => math.Random.secure().nextInt(256)),
+//   );
 
-  final dummyTranscriptHash = createHash(Uint8List(0));
+//   final dummyTranscriptHash = createHash(Uint8List(0));
 
-  final artifacts = buildServerHandshakeArtifacts(
-    serverRandom: serverRandom,
-    serverPublicKey: keyPair.publicKeyBytes,
-    serverCert: serverCert,
-    transcriptHashBeforeCertVerify: dummyTranscriptHash,
-  );
+//   final artifacts = buildServerHandshakeArtifacts(
+//     serverRandom: serverRandom,
+//     serverPublicKey: keyPair.publicKeyBytes,
+//     serverCert: serverCert,
+//     transcriptHashBeforeCertVerify: dummyTranscriptHash,
+//   );
 
-  print('ServerHello:        ${HEX.encode(artifacts.serverHello)}');
-  print('EncryptedExtensions:${HEX.encode(artifacts.encryptedExtensions)}');
-  print('Certificate:        ${HEX.encode(artifacts.certificate)}');
-  print('CertificateVerify:  ${HEX.encode(artifacts.certificateVerify)}');
-}
+//   print('ServerHello:        ${HEX.encode(artifacts.serverHello)}');
+//   print('EncryptedExtensions:${HEX.encode(artifacts.encryptedExtensions)}');
+//   print('Certificate:        ${HEX.encode(artifacts.certificate)}');
+//   print('CertificateVerify:  ${HEX.encode(artifacts.certificateVerify)}');
+// }

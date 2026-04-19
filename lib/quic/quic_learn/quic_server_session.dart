@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -787,6 +788,15 @@ class QuicServerSession {
         }
 
         // =========================================================
+        // PING (0x01) — ack-eliciting
+        // =========================================================
+        if (frameType == 0x01) {
+          print('✅ Server parsed PING');
+          ackEliciting = true;
+          continue;
+        }
+
+        // =========================================================
         // CRYPTO (0x06) — ack-eliciting
         // =========================================================
         if (frameType == 0x06) {
@@ -864,6 +874,45 @@ class QuicServerSession {
             '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
           );
           continue;
+        }
+
+        // =========================================================
+        // CONNECTION_CLOSE (transport: 0x1c, application: 0x1d)
+        // =========================================================
+        if (frameType == 0x1c || frameType == 0x1d) {
+          if (buffer.remaining == 0) break;
+          final errorCode = buffer.pullVarInt();
+
+          int? offendingFrameType;
+          if (frameType == 0x1c) {
+            if (buffer.remaining == 0) break;
+            offendingFrameType = buffer.pullVarInt();
+          }
+
+          if (buffer.remaining == 0) break;
+          final reasonLen = buffer.pullVarInt();
+
+          if (buffer.remaining < reasonLen) {
+            print(
+              '🛑 Server CONNECTION_CLOSE reason truncated: need $reasonLen, have ${buffer.remaining}',
+            );
+            break;
+          }
+
+          final reasonBytes = reasonLen > 0
+              ? buffer.pullBytes(reasonLen)
+              : Uint8List(0);
+
+          final reason = utf8.decode(reasonBytes, allowMalformed: true);
+
+          print(
+            '🛑 Server parsed CONNECTION_CLOSE '
+            'frameType=0x${frameType.toRadixString(16)} '
+            'errorCode=0x${errorCode.toRadixString(16)} '
+            '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
+            'reason="$reason"',
+          );
+          break;
         }
 
         // =========================================================
@@ -957,6 +1006,7 @@ class QuicServerSession {
   late final Uint8List serverRandom = Uint8List.fromList(
     List.generate(32, (_) => math.Random.secure().nextInt(256)),
   );
+
   void _maybeHandleClientHello() {
     if (serverFlightSent) return;
 
@@ -980,13 +1030,29 @@ class QuicServerSession {
     // 3. Parse ClientHello
     // --------------------------------------------------
     final ClientHello clientHello = ClientHello.parse_tls_client_hello(
-      msg.sublist(4), // skip handshake header
+      msg.sublist(4), // strip handshake header
     );
 
     print("✅ Server has full ClientHello");
 
     // --------------------------------------------------
-    // 4. Derive handshake keys and build ServerHello
+    // 4. Select ALPN
+    // --------------------------------------------------
+    // If the parser exposes ALPNs, choose from what the client offered.
+    // Otherwise fall back to the quic-go example protocol.
+    final List<String> clientOfferedAlpns = clientHello.alpnProtocols.isEmpty
+        ? <String>[]
+        : clientHello.alpnProtocols;
+
+    final String selectedAlpn = clientOfferedAlpns.isEmpty
+        ? alpnQuicEchoExample
+        : chooseServerAlpn(clientOfferedAlpns);
+
+    print("✅ Client offered ALPNs: $clientOfferedAlpns");
+    print("✅ Server selected ALPN: $selectedAlpn");
+
+    // --------------------------------------------------
+    // 5. Derive handshake keys and build ServerHello
     //    (sets serverHelloMsg)
     // --------------------------------------------------
     _deriveHandshakeKeys(clientHello);
@@ -996,20 +1062,26 @@ class QuicServerSession {
     }
 
     // --------------------------------------------------
-    // 5. Transcript hash up to ServerHello
-    // --------------------------------------------------
-    final Uint8List transcriptHashBeforeCertVerify = createHash(
-      Uint8List.fromList([...clientHelloMsg!, ...serverHelloMsg!]),
-    );
-
-    // --------------------------------------------------
     // 6. Build server handshake artifacts
+    //    ✅ IMPORTANT:
+    //    transcript prefix = CH || SH
+    //    builder appends EE || Certificate before CertificateVerify
     // --------------------------------------------------
     final ServerHandshakeArtifacts artifacts = buildServerHandshakeArtifacts(
       serverRandom: serverRandom,
       serverPublicKey: keyPair.publicKeyBytes,
       serverCert: serverCert,
-      transcriptHashBeforeCertVerify: transcriptHashBeforeCertVerify,
+
+      transcriptPrefixBeforeCertVerify: Uint8List.fromList([
+        ...clientHelloMsg!,
+        ...serverHelloMsg!,
+      ]),
+
+      alpnProtocol: selectedAlpn,
+
+      // REQUIRED QUIC transport parameters
+      originalDestinationConnectionId: clientOrigDcid,
+      initialSourceConnectionId: localCid,
     );
 
     // --------------------------------------------------
