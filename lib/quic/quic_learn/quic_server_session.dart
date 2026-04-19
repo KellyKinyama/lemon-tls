@@ -1097,6 +1097,8 @@ class QuicServerSession {
     serverFlightSent = true;
   }
 
+  late Uint8List handshakeSecret;
+
   void _deriveHandshakeKeys(ClientHello clientHello) {
     // ✅ Extract X25519 key share from parsed object
     final keyShare = clientHello.keyShares!.firstWhere(
@@ -1147,7 +1149,7 @@ class QuicServerSession {
       length: hashLen,
     );
 
-    final handshakeSecret = hkdfExtract(
+    handshakeSecret = hkdfExtract(
       sharedSecret, // ikm
       salt: derivedSecret, // salt
     );
@@ -1477,6 +1479,89 @@ class QuicServerSession {
     _deriveApplicationSecrets();
   }
 
+  // void _deriveApplicationSecrets() {
+  //     if (applicationSecretsDerived) return;
+
+  //     final hashLen = 32;
+  //     final zero = Uint8List(hashLen);
+  //     final empty = Uint8List(0);
+
+  //     if (transcriptThroughServerFinishedBytes == null) {
+  //       throw StateError("Server transcript through Finished not prepared");
+  //     }
+
+  //     final transcriptHash = createHash(transcriptThroughServerFinishedBytes!);
+
+  //     final masterSecret = hkdfExtract(
+  //       zero, // ikm
+  //       salt: derivedSecret, // salt
+  //     );
+
+  //     final clientAppTrafficSecret = hkdfExpandLabel(
+  //       secret: masterSecret,
+  //       label: "c ap traffic",
+  //       context: transcriptHash,
+  //       length: hashLen,
+  //     );
+
+  //     final serverAppTrafficSecret = hkdfExpandLabel(
+  //       secret: masterSecret,
+  //       label: "s ap traffic",
+  //       context: transcriptHash,
+  //       length: hashLen,
+  //     );
+
+  //     final clientKey = hkdfExpandLabel(
+  //       secret: clientAppTrafficSecret,
+  //       label: "quic key",
+  //       context: empty,
+  //       length: 16,
+  //     );
+  //     final clientIv = hkdfExpandLabel(
+  //       secret: clientAppTrafficSecret,
+  //       label: "quic iv",
+  //       context: empty,
+  //       length: 12,
+  //     );
+  //     final clientHp = hkdfExpandLabel(
+  //       secret: clientAppTrafficSecret,
+  //       label: "quic hp",
+  //       context: empty,
+  //       length: 16,
+  //     );
+
+  //     final serverKey = hkdfExpandLabel(
+  //       secret: serverAppTrafficSecret,
+  //       label: "quic key",
+  //       context: empty,
+  //       length: 16,
+  //     );
+  //     final serverIv = hkdfExpandLabel(
+  //       secret: serverAppTrafficSecret,
+  //       label: "quic iv",
+  //       context: empty,
+  //       length: 12,
+  //     );
+  //     final serverHp = hkdfExpandLabel(
+  //       secret: serverAppTrafficSecret,
+  //       label: "quic hp",
+  //       context: empty,
+  //       length: 16,
+  //     );
+
+  //     // Server reads client application, writes server application
+  //     appRead = QuicKeys(key: clientKey, iv: clientIv, hp: clientHp);
+  //     appWrite = QuicKeys(key: serverKey, iv: serverIv, hp: serverHp);
+
+  //     applicationSecretsDerived = true;
+  //     encryptionLevel = EncryptionLevel.application;
+
+  //     print("✅ Server 1-RTT keys installed");
+  //     print("  appRead : $appRead");
+  //     print("  appWrite: $appWrite");
+  //   }
+  // }
+
   // ============================================================
   // Application (1-RTT) secrets
   // ============================================================
@@ -1492,12 +1577,34 @@ class QuicServerSession {
       throw StateError("Server transcript through Finished not prepared");
     }
 
+    //     empty_hash = SHA256("")
+    // derived_secret = HKDF-Expand-Label(key: handshake_secret, label: "derived", ctx: empty_hash, len: 32)
+    // master_secret = HKDF-Extract(salt: derived_secret, key: 00...)
+    // client_secret = HKDF-Expand-Label(key: master_secret, label: "c ap traffic", ctx: handshake_hash, len: 32)
+    // server_secret = HKDF-Expand-Label(key: master_secret, label: "s ap traffic", ctx: handshake_hash, len: 32)
+    // client_key = HKDF-Expand-Label(key: client_secret, label: "quic key", ctx: "", len: 16)
+    // server_key = HKDF-Expand-Label(key: server_secret, label: "quic key", ctx: "", len: 16)
+    // client_iv = HKDF-Expand-Label(key: client_secret, label: "quic iv", ctx: "", len: 12)
+    // server_iv = HKDF-Expand-Label(key: server_secret, label: "quic iv", ctx: "", len: 12)
+    // client_hp_key = HKDF-Expand-Label(key: client_secret, label: "quic hp", ctx: "", len: 16)
+    // server_hp_key = HKDF-Expand-Label(key: server_secret, label: "quic hp", ctx: "", len: 16)
     final transcriptHash = createHash(transcriptThroughServerFinishedBytes!);
-
+    final empty_hash = createHash(Uint8List(0));
+    final derived_secret = hkdfExpandLabel(
+      secret: handshakeSecret,
+      label: "derived",
+      context: empty_hash,
+      length: hashLen,
+    );
     final masterSecret = hkdfExtract(
       zero, // ikm
-      salt: derivedSecret, // salt
+      salt: derived_secret, // salt
     );
+
+    // final masterSecret = hkdfExtract(
+    //   zero, // ikm
+    //   salt: handshakeSecret, // salt
+    // );
 
     final clientAppTrafficSecret = hkdfExpandLabel(
       secret: masterSecret,

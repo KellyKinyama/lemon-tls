@@ -44,7 +44,7 @@ QuicHeaderInfo buildQuicHeader(
     firstByte = 0xE0 | pnLenBits; // 1110_00LL
   } else if (packetType == '0rtt') {
     firstByte = 0xD0 | pnLenBits; // 1101_00LL
-  } else if (packetType == '1rtt') {
+  } else if (packetType == '1rtt' || packetType == 'short') {
     // Short Header: 01xx_xxLL. The bits 4 and 5 are reserved (0) or Key Phase (1).
     firstByte = 0x40 | pnLenBits; // 0100_00LL (Assuming Key Phase 0)
 

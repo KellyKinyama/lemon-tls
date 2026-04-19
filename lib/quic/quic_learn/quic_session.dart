@@ -716,7 +716,7 @@ class QuicSession {
     );
 
     // ✅ HANDSHAKE SECRET (THIS WAS CORRECT)
-    final handshakeSecret = hkdfExtract(
+    handshakeSecret = hkdfExtract(
       sharedSecret, // ikm
       salt: derivedSecret, // salt
     );
@@ -796,6 +796,8 @@ class QuicSession {
     print("✅ QUIC/TLS handshake keys derived (spec-correct)");
   }
 
+  late Uint8List handshakeSecret;
+
   void deriveApplicationSecrets() {
     print("🔐 Deriving application (1‑RTT) secrets");
 
@@ -808,9 +810,19 @@ class QuicSession {
     // (Finished already appended to tlsTranscript)
     // --------------------------------------------------
     final transcriptHash = createHash(transcriptThroughServerHandshake());
-    ;
-    print("Application Transcript Hash: ${HEX.encode(transcriptHash)}");
 
+    print("Application Transcript Hash: ${HEX.encode(transcriptHash)}");
+    final empty_hash = createHash(empty);
+    final derived_secret = hkdfExpandLabel(
+      secret: handshakeSecret,
+      label: "derived",
+      context: empty_hash,
+      length: hashLen,
+    );
+    final masterSecret = hkdfExtract(
+      zero, // ikm
+      salt: derived_secret, // salt
+    );
     // --------------------------------------------------
     // MASTER SECRET
     // master_secret = HKDF‑Extract(derived_secret, zeros)
@@ -818,10 +830,10 @@ class QuicSession {
     // NOTE: hkdfExtract(ikm, salt)
     // TLS: HKDF‑Extract(salt = derived_secret, ikm = zeros)
     // --------------------------------------------------
-    final masterSecret = hkdfExtract(
-      zero, // ikm
-      salt: derivedSecret, // salt
-    );
+    // final masterSecret = hkdfExtract(
+    //   zero, // ikm
+    //   salt: derivedSecret, // salt
+    // );
 
     print("master_secret: ${HEX.encode(masterSecret)}");
 
