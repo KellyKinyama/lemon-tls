@@ -126,7 +126,7 @@ QuicDecryptedPacket? decryptQuicPacketBytes(
         array: mutableArray,
         pnOffset: pnOffset,
         hpKey: readHp,
-        isShort: false,
+        // isShort: false,
       );
 
       // Decrypt details
@@ -179,7 +179,7 @@ QuicDecryptedPacket? decryptQuicPacketBytes(
         array: mutableArray,
         pnOffset: pnOffset,
         hpKey: readHp,
-        isShort: true,
+        // isShort: true,
       );
 
       // Decrypt details
@@ -654,7 +654,7 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
         array: mutable,
         pnOffset: pnOffset,
         hpKey: readHp,
-        isShort: false,
+        // isShort: false,
       );
 
       // ✅ sanity check
@@ -713,7 +713,7 @@ QuicDecryptedPacket? decryptQuicPacketBytes2(
         array: mutable,
         pnOffset: pnOffset,
         hpKey: readHp,
-        isShort: true,
+        // isShort: true,
       );
 
       if (pnLength < 1 || pnLength > 4) {
@@ -1124,7 +1124,7 @@ Uint8List? encryptQuicPacket(
     pnLength,
   );
 }
-// 
+//
 // main function with corrected DCID and SCID inputs:
 
 // void main() {

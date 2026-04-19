@@ -23,45 +23,126 @@ int decodeTruncatedPN(Uint8List array, int offset, int length) {
 ///
 /// The [array] is modified in place.
 /// Returns the Packet Number Length (1, 2, 3, or 4 bytes).
+// int removeHeaderProtection({
+//   required Uint8List array,
+//   required int pnOffset,
+//   required Uint8List hpKey,
+//   required bool isShort,
+// }) {
+//   // Step 1: Get the 16-byte sample from the encrypted payload
+//   var sampleOffset = pnOffset + 4;
+//   const sampleLength = 16;
+//   if (sampleOffset + sampleLength > array.length) {
+//     throw Exception("Not enough bytes for header protection sample");
+//   }
+//   final sample = array.sublist(sampleOffset, sampleOffset + sampleLength);
+
+//   // Use AES-128-ECB to generate the 5-byte mask
+//   final maskFull = aes128Ecb(sample, hpKey);
+//   final mask = maskFull.sublist(0, 5);
+
+//   // Step 2: Remove protection from the first byte
+//   if (isShort) {
+//     // Short Header: XOR the 5 lowest bits (0x1f = 0b0001_1111)
+//     array[0] ^= mask[0] & 0x1f;
+//   } else {
+//     // Long Header: XOR the 4 lowest bits (0x0f = 0b0000_1111)
+//     array[0] ^= mask[0] & 0x0f;
+//   }
+
+//   // Step 3: Determine Packet Number Length and remove protection from the PN field
+//   // pnLength is determined by the two lowest bits of the now-unmasked first byte.
+//   final pnLength = (array[0] & 0x03) + 1;
+
+//   if (pnOffset + pnLength > array.length) {
+//     throw Exception(
+//       "Packet number field extends beyond packet length after header protection removal.",
+//     );
+//   }
+
+//   for (var i = 0; i < pnLength; i++) {
+//     // mask[1] is for the first PN byte, mask[2] for the second, etc.
+//     array[pnOffset + i] ^= mask[1 + i];
+//   }
+
+//   return pnLength;
+// }
 int removeHeaderProtection({
   required Uint8List array,
   required int pnOffset,
   required Uint8List hpKey,
-  required bool isShort,
 }) {
-  // Step 1: Get the 16-byte sample from the encrypted payload
-  var sampleOffset = pnOffset + 4;
+  if (array.isEmpty) {
+    throw StateError("Packet is empty");
+  }
+
+  // Header form bit is NOT header-protected, so this is safe now.
+  final isShort = (array[0] & 0x80) == 0;
+
   const sampleLength = 16;
+  final sampleOffset = pnOffset + 4;
+
   if (sampleOffset + sampleLength > array.length) {
-    throw Exception("Not enough bytes for header protection sample");
-  }
-  final sample = array.sublist(sampleOffset, sampleOffset + sampleLength);
-
-  // Use AES-128-ECB to generate the 5-byte mask
-  final maskFull = aes128Ecb(sample, hpKey);
-  final mask = maskFull.sublist(0, 5);
-
-  // Step 2: Remove protection from the first byte
-  if (isShort) {
-    // Short Header: XOR the 5 lowest bits (0x1f = 0b0001_1111)
-    array[0] ^= mask[0] & 0x1f;
-  } else {
-    // Long Header: XOR the 4 lowest bits (0x0f = 0b0000_1111)
-    array[0] ^= mask[0] & 0x0f;
-  }
-
-  // Step 3: Determine Packet Number Length and remove protection from the PN field
-  // pnLength is determined by the two lowest bits of the now-unmasked first byte.
-  final pnLength = (array[0] & 0x03) + 1;
-
-  if (pnOffset + pnLength > array.length) {
-    throw Exception(
-      "Packet number field extends beyond packet length after header protection removal.",
+    throw StateError(
+      "Not enough bytes for header protection sample "
+      "(need ${sampleOffset + sampleLength}, have ${array.length})",
     );
   }
 
-  for (var i = 0; i < pnLength; i++) {
-    // mask[1] is for the first PN byte, mask[2] for the second, etc.
+  final sample = array.sublist(sampleOffset, sampleOffset + sampleLength);
+
+  // IMPORTANT:
+  // Use the SAME helper/signature as the encrypt path.
+  final maskFull = aesEcbEncrypt(hpKey, sample);
+  final mask = maskFull.sublist(0, 5);
+
+  // ------------------------------------------------------------
+  // Unmask first byte
+  // ------------------------------------------------------------
+  if (isShort) {
+    // Short header: unmask low 5 bits
+    array[0] ^= (mask[0] & 0x1f);
+
+    // Reserved bits for short header are bits 4-3 and MUST be zero
+    final reservedBits = (array[0] >> 3) & 0x03;
+    if (reservedBits != 0) {
+      throw StateError(
+        "Invalid short-header reserved bits after HP removal: "
+        "${reservedBits.toRadixString(2).padLeft(2, '0')} "
+        "(firstByte=0x${array[0].toRadixString(16)})",
+      );
+    }
+  } else {
+    // Long header: unmask low 4 bits
+    array[0] ^= (mask[0] & 0x0f);
+
+    // Reserved bits for long header are bits 3-2 and MUST be zero
+    final reservedBits = (array[0] >> 2) & 0x03;
+    if (reservedBits != 0) {
+      throw StateError(
+        "Invalid long-header reserved bits after HP removal: "
+        "${reservedBits.toRadixString(2).padLeft(2, '0')} "
+        "(firstByte=0x${array[0].toRadixString(16)})",
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Determine packet number length from unmasked first byte
+  // ------------------------------------------------------------
+  final pnLength = (array[0] & 0x03) + 1;
+
+  if (pnOffset + pnLength > array.length) {
+    throw StateError(
+      "Packet number field extends beyond packet length after HP removal "
+      "(pnOffset=$pnOffset, pnLength=$pnLength, packetLen=${array.length})",
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Unmask packet number bytes
+  // ------------------------------------------------------------
+  for (int i = 0; i < pnLength; i++) {
     array[pnOffset + i] ^= mask[1 + i];
   }
 
@@ -120,7 +201,7 @@ void main() {
     array: quickPacket,
     pnOffset: 23,
     hpKey: hpKey,
-    isShort: false,
+    // isShort: false,
   );
 
   print("Packet number lemgth: $packNumLength");
