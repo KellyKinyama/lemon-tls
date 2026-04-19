@@ -523,6 +523,12 @@ class QuicServerSession {
     if (level == EncryptionLevel.initial ||
         level == EncryptionLevel.handshake) {
       // sendAck(level: level);
+
+      final currentPacketLevel = handshakeComplete
+          ? EncryptionLevel.application
+          : level;
+
+      sendAck(level: currentPacketLevel);
     }
   }
 
@@ -995,12 +1001,12 @@ class QuicServerSession {
       verifyData.length,
       ...verifyData,
     ]);
-    print("clientHelloMsg:      ${HEX.encode(clientHelloMsg!)}");
-    print("serverHelloMsg:      ${HEX.encode(serverHelloMsg!)}");
-    print("encryptedExtensions: ${HEX.encode(encryptedExtensions)}");
-    print("certificate:         ${HEX.encode(certificate)}");
-    print("certificateVerify:   ${HEX.encode(certificateVerify)}");
-    print("serverFinishedBytes: ${HEX.encode(serverFinishedBytes!)}");
+    // print("clientHelloMsg:      ${HEX.encode(clientHelloMsg!)}");
+    // print("serverHelloMsg:      ${HEX.encode(serverHelloMsg!)}");
+    // print("encryptedExtensions: ${HEX.encode(encryptedExtensions)}");
+    // print("certificate:         ${HEX.encode(certificate)}");
+    // print("certificateVerify:   ${HEX.encode(certificateVerify)}");
+    // print("serverFinishedBytes: ${HEX.encode(serverFinishedBytes!)}");
 
     transcriptThroughServerFinishedBytes = Uint8List.fromList([
       ...clientHelloMsg!,
@@ -1091,6 +1097,55 @@ class QuicServerSession {
   // Client Finished handling
   // ============================================================
 
+  // void _maybeHandleClientFinished() {
+  //   if (clientFinishedVerified) return;
+
+  //   final stream = receivedHandshakeByLevel[EncryptionLevel.handshake]!;
+  //   final fullFinished = _extractHandshakeMessage(stream, 0x14);
+  //   if (fullFinished == null) {
+  //     return;
+  //   }
+
+  //   if (transcriptThroughServerFinishedBytes == null) {
+  //     throw StateError("Server transcript through Finished not prepared");
+  //   }
+
+  //   final transcriptHash = createHash(transcriptThroughServerFinishedBytes!);
+
+  //   final clientFinishedKey = hkdfExpandLabel(
+  //     secret: clientHsTrafficSecret,
+  //     label: "finished",
+  //     context: Uint8List(0),
+  //     length: 32,
+  //   );
+
+  //   final expectedVerifyData = hmacSha256(
+  //     key: clientFinishedKey,
+  //     data: transcriptHash,
+  //   );
+
+  //   final receivedVerifyData = fullFinished.sublist(4); // skip handshake header
+
+  //   final ok = const ListEquality<int>().equals(
+  //     expectedVerifyData,
+  //     receivedVerifyData,
+  //   );
+
+  //   print("✅ Server received Client Finished");
+  //   print("  expected: ${HEX.encode(expectedVerifyData)}");
+  //   print("  actual  : ${HEX.encode(receivedVerifyData)}");
+
+  //   if (!ok) {
+  //     throw StateError("Client Finished verify_data mismatch");
+  //   }
+
+  //   clientFinishedVerified = true;
+  //   print("✅ Client Finished verified");
+
+  //   _deriveApplicationSecrets();
+  // }
+  bool handshakeComplete = false;
+
   void _maybeHandleClientFinished() {
     if (clientFinishedVerified) return;
 
@@ -1134,8 +1189,13 @@ class QuicServerSession {
     }
 
     clientFinishedVerified = true;
+
+    // ✅ CRITICAL: mark handshake complete BEFORE switching protection
+    handshakeComplete = true;
+
     print("✅ Client Finished verified");
 
+    // ✅ Install 1-RTT keys; all future ACKs must be application-level
     _deriveApplicationSecrets();
   }
 

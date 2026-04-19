@@ -238,7 +238,7 @@ class QuicSession {
 
     // IMPORTANT: append Finished to transcript AFTER computing verify_data
     // tlsTranscript.add(finishedBytes);
-    print("client hello: ${HEX.encode(tlsTranscript.toBytes())}");
+    // print("client hello: ${HEX.encode(tlsTranscript.toBytes())}");
     // print("client hello: ${HEX.encode(serverHelloMsg!)}");
     // print("client hello: ${HEX.encode(encryptedExtensions)}");
     // print("client hello: ${HEX.encode(certificate)}");

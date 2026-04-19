@@ -43,8 +43,8 @@ ParsedQuicPayload parsePayload(
   AckFrame? ackFrame;
 
   try {
-    while (!buffer.eof) {
-      // while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
+    // while (!buffer.eof) {
+    while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
       final frameType = buffer.pullVarInt();
 
       // =========================================================
@@ -111,7 +111,7 @@ ParsedQuicPayload parsePayload(
       // ✅ Skip unknown frames
       // =========================================================
       else {
-        print('ℹ️ Skipping frame type 0x${frameType.toRadixString(16)}');
+        // print('ℹ️ Skipping frame type 0x${frameType.toRadixString(16)}');
       }
     }
   } catch (e, st) {
