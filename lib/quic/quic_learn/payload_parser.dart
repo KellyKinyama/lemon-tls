@@ -43,7 +43,8 @@ ParsedQuicPayload parsePayload(
   AckFrame? ackFrame;
 
   try {
-    while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
+    while (!buffer.eof) {
+      // while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
       final frameType = buffer.pullVarInt();
 
       // =========================================================

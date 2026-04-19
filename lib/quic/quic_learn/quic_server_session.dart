@@ -950,6 +950,8 @@ class QuicServerSession {
     print("  certificateVerify  : ${certificateVerify.length} bytes");
   }
 
+  bool serverHandshakeFinished = false;
+
   void _sendServerHandshakeFlight() {
     // --------------------------------------------------
     // Preconditions
@@ -965,7 +967,7 @@ class QuicServerSession {
     }
 
     // --------------------------------------------------
-    // 1. Build TLS Finished
+    // 1. Build TLS Finished (RFC 8446 §4.4.4)
     // --------------------------------------------------
     final handshakeBeforeFinished = Uint8List.fromList([
       ...clientHelloMsg!,
@@ -994,10 +996,22 @@ class QuicServerSession {
       ...verifyData,
     ]);
 
+    transcriptThroughServerFinishedBytes = Uint8List.fromList([
+      ...clientHelloMsg!,
+      ...serverHelloMsg!,
+      ...encryptedExtensions,
+      ...certificate,
+      ...certificateVerify,
+      ...serverFinishedBytes!,
+    ]);
+
+    serverHandshakeFinished = true;
+
     print("✅ Server built Finished verify_data=${HEX.encode(verifyData)}");
 
     // --------------------------------------------------
     // 2. Send ServerHello in INITIAL packet
+    //    (Initial CRYPTO stream, offset = 0)
     // --------------------------------------------------
     {
       final crypto = buildCryptoFrameAt(0, serverHelloMsg!);
@@ -1024,10 +1038,10 @@ class QuicServerSession {
     }
 
     // --------------------------------------------------
-    // 3. Send each remaining handshake message
-    //    in its own Handshake packet
+    // 3. Send remaining handshake messages
+    //    (Handshake CRYPTO stream, offset starts at 0 ✅)
     // --------------------------------------------------
-    int offset = serverHelloMsg!.length;
+    int offset = 0; // ✅ CRITICAL FIX
 
     void sendHandshake(Uint8List msg) {
       final crypto = buildCryptoFrameAt(offset, msg);
@@ -1067,7 +1081,6 @@ class QuicServerSession {
     // Finished
     sendHandshake(serverFinishedBytes!);
   }
-
   // ============================================================
   // Client Finished handling
   // ============================================================
