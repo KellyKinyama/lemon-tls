@@ -475,14 +475,65 @@ class QuicSession {
   //   return result;
   // }
 
-  QuicDecryptedPacket decryptPacket(Uint8List packet, EncryptionLevel level) {
-    final keys = _readKeys[level];
-    if (keys == null) {
-      throw StateError('No keys for $level');
+  // QuicDecryptedPacket decryptPacket(Uint8List packet, EncryptionLevel level) {
+  //   final keys = _readKeys[level];
+  //   if (keys == null) {
+  //     throw StateError('No keys for $level');
+  //   }
+
+  //   if (level == EncryptionLevel.handshake) {
+  //     dcid = Uint8List.fromList(HEX.decode("635f636964"));
+  //   }
+
+  //   final pnSpace = _pnSpaces[level]!;
+
+  //   final result = decryptQuicPacketBytes2(
+  //     packet,
+  //     keys.key,
+  //     keys.iv,
+  //     keys.hp,
+  //     dcid,
+  //     pnSpace.largestPn, // ✅ FIX: do not normalize -1 to 0
+  //   );
+
+  //   if (result == null) {
+  //     throw StateError('Decryption failed');
+  //   }
+
+  //   // ✅ Update PN space only after successful decryption
+  //   pnSpace.onPacketDecrypted(result.packetNumber);
+
+  //   return result;
+  // }
+
+  QuicDecryptedPacket decryptPacket(Uint8List packet, EncryptionLevel _unused) {
+    // --------------------------------------------------
+    // ✅ Determine encryption level FROM THE PACKET HEADER
+    // --------------------------------------------------
+    final firstByte = packet[0];
+    late final EncryptionLevel level;
+
+    if ((firstByte & 0x80) != 0) {
+      // LONG HEADER → Initial or Handshake
+      final longType = parseLongHeaderType(packet);
+
+      if (longType == LongPacketType.initial) {
+        level = EncryptionLevel.initial;
+      } else if (longType == LongPacketType.handshake) {
+        level = EncryptionLevel.handshake;
+      } else {
+        // Retry / 0-RTT not supported in this stack
+        throw StateError('Unsupported long-header packet type: $longType');
+      }
+    } else {
+      // SHORT HEADER → Application (1-RTT)
+      level = EncryptionLevel.application;
     }
 
-    if (level == EncryptionLevel.handshake) {
-      dcid = Uint8List.fromList(HEX.decode("635f636964"));
+    final keys = _readKeys[level];
+    if (keys == null) {
+      // Key phase may already be discarded → drop
+      throw StateError('No read keys for $level');
     }
 
     final pnSpace = _pnSpaces[level]!;
@@ -493,14 +544,15 @@ class QuicSession {
       keys.iv,
       keys.hp,
       dcid,
-      pnSpace.largestPn, // ✅ FIX: do not normalize -1 to 0
+      pnSpace.largestPn, // ✅ do NOT normalize -1
     );
 
     if (result == null) {
+      // ✅ RFC 9000: silently drop packets that fail auth
       throw StateError('Decryption failed');
     }
 
-    // ✅ Update PN space only after successful decryption
+    // ✅ Update PN space ONLY after successful decryption
     pnSpace.onPacketDecrypted(result.packetNumber);
 
     return result;
@@ -1117,6 +1169,28 @@ List<Uint8List> splitCoalescedPackets(Uint8List buf) {
   }
 
   return out;
+}
+
+enum LongPacketType { initial, zeroRtt, handshake, retry }
+
+LongPacketType parseLongHeaderType(Uint8List packet) {
+  final firstByte = packet[0];
+
+  // Bits 4–5 encode the long header packet type
+  final typeBits = (firstByte >> 4) & 0x03;
+
+  switch (typeBits) {
+    case 0x0:
+      return LongPacketType.initial;
+    case 0x1:
+      return LongPacketType.zeroRtt;
+    case 0x2:
+      return LongPacketType.handshake;
+    case 0x3:
+      return LongPacketType.retry;
+    default:
+      throw StateError('Invalid long header type bits: $typeBits');
+  }
 }
 
 final clientHelloBytes = Uint8List.fromList(

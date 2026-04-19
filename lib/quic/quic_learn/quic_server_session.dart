@@ -520,15 +520,15 @@ class QuicServerSession {
   void _onDecryptedPacket(QuicDecryptedPacket pkt, EncryptionLevel level) {
     ackStates[level]!.received.add(pkt.packetNumber);
 
+    // ✅ After handshake, ALL ACKs must be application-level (short header)
+    if (handshakeComplete) {
+      sendAck(level: EncryptionLevel.application);
+      return;
+    }
+
     if (level == EncryptionLevel.initial ||
         level == EncryptionLevel.handshake) {
-      // sendAck(level: level);
-
-      final currentPacketLevel = handshakeComplete
-          ? EncryptionLevel.application
-          : level;
-
-      sendAck(level: currentPacketLevel);
+      sendAck(level: level);
     }
   }
 
@@ -554,12 +554,12 @@ class QuicServerSession {
 
     Uint8List ackPayload = ackFrame.encode();
 
-    // ✅ Use the server's packet-number allocator
     final pn = _allocateSendPn(level);
 
     final writeKeys = switch (level) {
       EncryptionLevel.initial => initialWrite,
       EncryptionLevel.handshake => handshakeWrite,
+      EncryptionLevel.application => appWrite,
       _ => throw StateError("ACK not supported for $level"),
     };
 
@@ -573,6 +573,7 @@ class QuicServerSession {
     Uint8List? rawPacket;
 
     if (level == EncryptionLevel.initial) {
+      // Initial packets MUST be padded to >= 1200 bytes
       while (true) {
         rawPacket = encryptQuicPacket(
           "initial",
@@ -591,16 +592,12 @@ class QuicServerSession {
           return;
         }
 
-        if (rawPacket.length >= 1200) {
-          break;
-        }
+        if (rawPacket.length >= 1200) break;
 
         final deficit = 1200 - rawPacket.length;
-
-        // Add QUIC PADDING frames (0x00) to the payload
         ackPayload = Uint8List.fromList([...ackPayload, ...Uint8List(deficit)]);
       }
-    } else {
+    } else if (level == EncryptionLevel.handshake) {
       rawPacket = encryptQuicPacket(
         "handshake",
         ackPayload,
@@ -612,11 +609,28 @@ class QuicServerSession {
         scidToUse,
         Uint8List(0),
       );
+    } else {
+      // ✅ Application ACKs MUST use short-header packets
+      rawPacket = encryptQuicPacket(
+        "short",
+        ackPayload,
+        writeKeys.key,
+        writeKeys.iv,
+        writeKeys.hp,
+        pn,
+        dcidToUse,
+        scidToUse,
+        Uint8List(0),
+      );
+    }
 
-      if (rawPacket == null) {
-        print("❌ Failed to encrypt ACK ($level)");
-        return;
-      }
+    if (handshakeComplete && level != EncryptionLevel.application) {
+      throw StateError("BUG: non-application ACK after handshake");
+    }
+
+    if (rawPacket == null) {
+      print("❌ Failed to encrypt ACK ($level)");
+      return;
     }
 
     socket.send(rawPacket, peerAddress, peerPort);
@@ -625,6 +639,7 @@ class QuicServerSession {
       "✅ Sent ACK ($level) pn=$pn acked=${ackState.received.toList()..sort()}",
     );
   }
+
   // ============================================================
   // Payload / CRYPTO parsing
   // ============================================================
