@@ -19,6 +19,7 @@ import '../cipher/x25519.dart';
 import 'package:x25519/x25519.dart' as ecdhe;
 
 import 'cert_utils.dart';
+import 'tls_server_builder.dart';
 
 class KeyPair {
   final Uint8List _privateKey;
@@ -704,27 +705,72 @@ class QuicServerSession {
   // ============================================================
   // ClientHello handling → derive handshake keys → send flight
   // ============================================================
-
+  late final Uint8List serverRandom = Uint8List.fromList(
+    List.generate(32, (_) => math.Random.secure().nextInt(256)),
+  );
   void _maybeHandleClientHello() {
     if (serverFlightSent) return;
 
-    final stream = receivedHandshakeByLevel[EncryptionLevel.initial]!;
-    final msg = _extractHandshakeMessage(stream, 0x01);
+    // --------------------------------------------------
+    // 1. Access Initial CRYPTO stream
+    // --------------------------------------------------
+    final BytesBuilder stream =
+        receivedHandshakeByLevel[EncryptionLevel.initial]!;
+
+    final Uint8List? msg = _extractHandshakeMessage(stream, 0x01);
     if (msg == null) {
       return;
     }
 
-    // ✅ Store raw ClientHello handshake bytes
+    // --------------------------------------------------
+    // 2. Store raw ClientHello handshake bytes
+    // --------------------------------------------------
     clientHelloMsg = msg;
 
-    // ✅ Parse into object (name stays `clientHello`)
-    final clientHello = ClientHello.parse_tls_client_hello(
+    // --------------------------------------------------
+    // 3. Parse ClientHello
+    // --------------------------------------------------
+    final ClientHello clientHello = ClientHello.parse_tls_client_hello(
       msg.sublist(4), // skip handshake header
     );
 
     print("✅ Server has full ClientHello");
 
+    // --------------------------------------------------
+    // 4. Derive handshake keys and build ServerHello
+    //    (sets serverHelloMsg)
+    // --------------------------------------------------
     _deriveHandshakeKeys(clientHello);
+
+    if (serverHelloMsg == null) {
+      throw StateError("serverHelloMsg not initialized");
+    }
+
+    // --------------------------------------------------
+    // 5. Transcript hash up to ServerHello
+    // --------------------------------------------------
+    final Uint8List transcriptHashBeforeCertVerify = createHash(
+      Uint8List.fromList([...clientHelloMsg!, ...serverHelloMsg!]),
+    );
+
+    // --------------------------------------------------
+    // 6. Build server handshake artifacts
+    // --------------------------------------------------
+    final ServerHandshakeArtifacts artifacts = buildServerHandshakeArtifacts(
+      serverRandom: serverRandom,
+      serverPublicKey: keyPair.publicKeyBytes,
+      serverCert: serverCert,
+      transcriptHashBeforeCertVerify: transcriptHashBeforeCertVerify,
+    );
+
+    // --------------------------------------------------
+    // 7. STORE late handshake variables (CRITICAL)
+    // --------------------------------------------------
+    _storeServerHandshakeArtifacts(artifacts);
+
+    // --------------------------------------------------
+    // 8. Send server handshake flight
+    // --------------------------------------------------
     _sendServerHandshakeFlight();
 
     serverFlightSent = true;
@@ -748,9 +794,7 @@ class QuicServerSession {
 
     // ✅ Build ServerHello ONCE and store raw bytes
     serverHelloMsg = buildServerHello(
-      serverRandom: Uint8List.fromList(
-        List.generate(32, (i) => math.Random.secure().nextInt(256)),
-      ),
+      serverRandom: serverRandom,
       publicKey: keyPair.publicKeyBytes, // ✅ from KeyPai
       sessionId: Uint8List(0),
       cipherSuite: 0x1301,
@@ -848,6 +892,17 @@ class QuicServerSession {
     print("✅ Server handshake keys ready");
     print("  handshakeRead : $handshakeRead");
     print("  handshakeWrite: $handshakeWrite");
+  }
+
+  void _storeServerHandshakeArtifacts(ServerHandshakeArtifacts artifacts) {
+    encryptedExtensions = artifacts.encryptedExtensions;
+    certificate = artifacts.certificate;
+    certificateVerify = artifacts.certificateVerify;
+
+    print("✅ Server handshake artifacts stored");
+    print("  encryptedExtensions: ${encryptedExtensions.length} bytes");
+    print("  certificate        : ${certificate.length} bytes");
+    print("  certificateVerify  : ${certificateVerify.length} bytes");
   }
 
   void _sendServerHandshakeFlight() {
