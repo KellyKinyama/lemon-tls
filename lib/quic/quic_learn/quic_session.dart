@@ -10,6 +10,7 @@ import '../handshake/finished.dart';
 import '../handshake/tls_messages.dart';
 import '../hash.dart';
 import '../quic_ack.dart';
+import 'client_hello_builder.dart';
 import 'payload_parser.dart';
 
 import '../hkdf.dart';
@@ -193,7 +194,9 @@ class QuicSession {
     // =====================================================
     // 1. Compute transcript hash (up to CertificateVerify)
     // =====================================================
-    final transcriptHash = createHash(tlsTranscript.toBytes());
+    final transcriptHash = createHash(
+      Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
+    );
 
     // =====================================================
     // 2. Derive finished_key
@@ -234,7 +237,13 @@ class QuicSession {
     final finishedBytes = finishedHandshake.toBytes();
 
     // IMPORTANT: append Finished to transcript AFTER computing verify_data
-    tlsTranscript.add(finishedBytes);
+    // tlsTranscript.add(finishedBytes);
+    print("client hello: ${HEX.encode(tlsTranscript.toBytes())}");
+    // print("client hello: ${HEX.encode(serverHelloMsg!)}");
+    // print("client hello: ${HEX.encode(encryptedExtensions)}");
+    // print("client hello: ${HEX.encode(certificate)}");
+    // print("client hello: ${HEX.encode(certificateVerify)}");
+    // print("client hello: ${HEX.encode(serverFinishedBytes!)}");
 
     // =====================================================
     // 5. Wrap in CRYPTO frame (using your helper)
@@ -852,6 +861,9 @@ class QuicSession {
     _writeKeys[EncryptionLevel.application] = appWrite!;
 
     encryptionLevel = EncryptionLevel.application;
+
+    print("appRead:  $appRead");
+    print("appWrite: $appWrite");
 
     print("✅ 1‑RTT application keys installed");
   }

@@ -995,6 +995,12 @@ class QuicServerSession {
       verifyData.length,
       ...verifyData,
     ]);
+    print("clientHelloMsg:      ${HEX.encode(clientHelloMsg!)}");
+    print("serverHelloMsg:      ${HEX.encode(serverHelloMsg!)}");
+    print("encryptedExtensions: ${HEX.encode(encryptedExtensions)}");
+    print("certificate:         ${HEX.encode(certificate)}");
+    print("certificateVerify:   ${HEX.encode(certificateVerify)}");
+    print("serverFinishedBytes: ${HEX.encode(serverFinishedBytes!)}");
 
     transcriptThroughServerFinishedBytes = Uint8List.fromList([
       ...clientHelloMsg!,
