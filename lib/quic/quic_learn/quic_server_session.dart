@@ -1,17 +1,50 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
 
 import '../buffer.dart';
-import '../frames/quic_frames.dart';
+// import '../frames/quic_frames.dart';
+import '../handshake/client_hello.dart';
+import '../handshake/server_hello.dart';
 import '../hash.dart';
 import '../hkdf.dart';
 import '../packet/quic_packet.dart';
 import '../quic_ack.dart';
 import '../utils.dart';
 import '../cipher/x25519.dart';
+
+import 'package:x25519/x25519.dart' as ecdhe;
+
+import 'cert_utils.dart';
+
+class KeyPair {
+  final Uint8List _privateKey;
+
+  KeyPair._(this._privateKey);
+
+  /// Raw 32-byte X25519 public key.
+  /// Raw 32-byte X25519 public key.
+  Uint8List get publicKeyBytes {
+    // Public key = X25519(privateKey, basePoint)
+    final pub = ecdhe.X25519(_privateKey, ecdhe.basePoint);
+    return Uint8List.fromList(pub);
+  }
+
+  /// Raw 32-byte X25519 private key.
+  Uint8List get privateKeyBytes => Uint8List.fromList(_privateKey);
+
+  static KeyPair generate() {
+    final seed = Uint8List(32);
+    final rnd = math.Random.secure();
+    for (var i = 0; i < seed.length; i++) {
+      seed[i] = rnd.nextInt(256);
+    }
+    return KeyPair._(seed);
+  }
+}
 
 Uint8List _padTo1200(Uint8List pkt) {
   const minInitialSize = 1200;
@@ -169,44 +202,6 @@ class QuicServerSession {
   late Uint8List clientOrigDcid;
 
   /// The client currently hardcodes this exact ClientHello.
-  final Uint8List clientHelloBytes = Uint8List.fromList(
-    HEX.decode(
-      "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f "
-      "10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 "
-      "13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e "
-      "75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 "
-      "00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 "
-      "08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 "
-      "1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 "
-      "a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 "
-      "03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 "
-      "00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b "
-      "01 19 0f 05 63 5f 63 69 64",
-    ),
-  );
-
-  /// Same fixed client X25519 public key embedded in the hardcoded ClientHello
-  final Uint8List clientPublicKey = Uint8List.fromList(
-    HEX.decode(
-      "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
-    ),
-  );
-
-  /// Deterministic server X25519 keypair (you can replace with your own)
-  final Uint8List serverPrivateKeyBytes = Uint8List.fromList(
-    HEX.decode(
-      "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
-    ),
-  );
-
-  final Uint8List serverPublicKeyBytes = Uint8List.fromList(
-    HEX.decode(
-      // Public key corresponding to the private key above
-      "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a",
-    ),
-  );
-
-  final ServerHandshakeFlight flight;
 
   EncryptionLevel encryptionLevel = EncryptionLevel.initial;
 
@@ -220,6 +215,10 @@ class QuicServerSession {
 
   Uint8List? serverFinishedBytes;
   Uint8List? transcriptThroughServerFinishedBytes;
+
+  late Uint8List encryptedExtensions; // built earlier
+  late Uint8List certificate; // built earlier
+  late Uint8List certificateVerify; // built earlier
 
   final Map<EncryptionLevel, PacketNumberSpace> recvPnSpaces = {
     EncryptionLevel.initial: PacketNumberSpace(),
@@ -266,11 +265,27 @@ class QuicServerSession {
   final peerScid = Uint8List.fromList(HEX.decode("635f636964"));
   final localCid = Uint8List.fromList(HEX.decode("0001020304050607"));
 
+  EcdsaCert serverCert = generateSelfSignedCertificate();
+  KeyPair keyPair = KeyPair.generate();
+
+  late ClientHello ch;
+
+  // Full TLS ClientHello handshake message (type + len + body)
+  Uint8List? fullClientHelloBytes;
+
+  // Full TLS ServerHello handshake message (type + len + body)
+  Uint8List? serverHelloBytes;
+
+  // Full TLS ClientHello handshake message (type + 3-byte length + body)
+  Uint8List? clientHelloMsg;
+
+  // Full TLS ServerHello handshake message (type + 3-byte length + body)
+  Uint8List? serverHelloMsg;
+
   QuicServerSession({
     required this.socket,
     required this.peerAddress,
     required this.peerPort,
-    required this.flight,
   });
 
   // QuicServerSession(this.dcid, this.socket);
@@ -694,28 +709,58 @@ class QuicServerSession {
     if (serverFlightSent) return;
 
     final stream = receivedHandshakeByLevel[EncryptionLevel.initial]!;
-    final fullClientHello = _extractHandshakeMessage(stream, 0x01);
-    if (fullClientHello == null) {
+    final msg = _extractHandshakeMessage(stream, 0x01);
+    if (msg == null) {
       return;
     }
 
+    // ✅ Store raw ClientHello handshake bytes
+    clientHelloMsg = msg;
+
+    // ✅ Parse into object (name stays `clientHello`)
+    final clientHello = ClientHello.parse_tls_client_hello(
+      msg.sublist(4), // skip handshake header
+    );
+
     print("✅ Server has full ClientHello");
 
-    _deriveHandshakeKeys();
+    _deriveHandshakeKeys(clientHello);
     _sendServerHandshakeFlight();
 
     serverFlightSent = true;
   }
 
-  void _deriveHandshakeKeys() {
-    final sharedSecret = x25519ShareSecret(
-      privateKey: serverPrivateKeyBytes,
-      publicKey: clientPublicKey,
+  void _deriveHandshakeKeys(ClientHello clientHello) {
+    // ✅ Extract X25519 key share from parsed object
+    final keyShare = clientHello.keyShares!.firstWhere(
+      (ks) => ks.group == 0x001d,
+      orElse: () => throw StateError("No X25519 key_share"),
     );
 
+    // --------------------------------------------------
+    // 2. Compute ECDHE shared secret (SERVER SIDE)
+    // --------------------------------------------------
+
+    final sharedSecret = x25519ShareSecret(
+      privateKey: keyPair.privateKeyBytes, // ✅ server private key
+      publicKey: keyShare.pub, // ✅ client public key
+    );
+
+    // ✅ Build ServerHello ONCE and store raw bytes
+    serverHelloMsg = buildServerHello(
+      serverRandom: Uint8List.fromList(
+        List.generate(32, (i) => math.Random.secure().nextInt(256)),
+      ),
+      publicKey: keyPair.publicKeyBytes, // ✅ from KeyPai
+      sessionId: Uint8List(0),
+      cipherSuite: 0x1301,
+      group: keyShare.group,
+    );
+
+    // ✅ Transcript = raw ClientHello || raw ServerHello
     final helloTranscript = Uint8List.fromList([
-      ...clientHelloBytes,
-      ...flight.serverHello,
+      ...clientHelloMsg!,
+      ...serverHelloMsg!,
     ]);
 
     final helloHash = createHash(helloTranscript);
@@ -809,14 +854,26 @@ class QuicServerSession {
     if (handshakeWrite == null) {
       throw StateError("Handshake write keys not ready");
     }
+    if (clientHelloMsg == null || serverHelloMsg == null) {
+      throw StateError("Handshake transcript not initialized");
+    }
 
-    final beforeFinished = Uint8List.fromList([
-      ...clientHelloBytes,
-      ...flight.bytesBeforeFinished(),
+    // --------------------------------------------------
+    // 1. Transcript up to (but not including) Finished
+    // --------------------------------------------------
+    final handshakeBeforeFinished = Uint8List.fromList([
+      ...clientHelloMsg!, // ClientHello
+      ...serverHelloMsg!, // ServerHello
+      ...encryptedExtensions, // EncryptedExtensions
+      ...certificate, // Certificate
+      ...certificateVerify, // CertificateVerify
     ]);
 
-    final transcriptHash = createHash(beforeFinished);
+    final transcriptHash = createHash(handshakeBeforeFinished);
 
+    // --------------------------------------------------
+    // 2. Compute server Finished verify_data
+    // --------------------------------------------------
     final serverFinishedKey = hkdfExpandLabel(
       secret: serverHsTrafficSecret,
       label: "finished",
@@ -827,26 +884,37 @@ class QuicServerSession {
     final verifyData = hmacSha256(key: serverFinishedKey, data: transcriptHash);
 
     serverFinishedBytes = Uint8List.fromList([
-      0x14,
+      0x14, // HandshakeType.finished
       0x00,
       0x00,
       verifyData.length,
       ...verifyData,
     ]);
 
+    print("✅ Server built Finished verify_data=${HEX.encode(verifyData)}");
+
+    // --------------------------------------------------
+    // 3. Full server handshake flight (server-only messages)
+    // --------------------------------------------------
     final fullFlight = Uint8List.fromList([
-      ...flight.bytesBeforeFinished(),
+      ...serverHelloMsg!, // ServerHello
+      ...encryptedExtensions,
+      ...certificate,
+      ...certificateVerify,
       ...serverFinishedBytes!,
     ]);
 
+    // --------------------------------------------------
+    // 4. Save transcript through Server Finished
+    // --------------------------------------------------
     transcriptThroughServerFinishedBytes = Uint8List.fromList([
-      ...clientHelloBytes,
+      ...clientHelloMsg!,
       ...fullFlight,
     ]);
 
-    print("✅ Server built Finished verify_data=${HEX.encode(verifyData)}");
-
-    // Fragment flight into CRYPTO frames
+    // --------------------------------------------------
+    // 5. Send flight as CRYPTO frames (Handshake level)
+    // --------------------------------------------------
     const maxChunk = 1000;
     int offset = 0;
 
