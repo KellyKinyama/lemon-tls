@@ -5,9 +5,10 @@ import 'quic_server_session.dart';
 Future<void> main() async {
   final socket = await RawDatagramSocket.bind("127.0.0.1", 4433);
 
-  QuicServerSession? quicSession;
+  QuicServerSession quicSession = QuicServerSession(socket: socket);
 
   print("server listening ip:${socket.address.address}:${socket.port}");
+  bool peerSet = false;
 
   socket.listen((ev) {
     if (ev == RawSocketEvent.read) {
@@ -17,12 +18,17 @@ Future<void> main() async {
       print("Data datagram received: ${dg.data.length}");
 
       // ✅ Create session on first packet only
-      quicSession ??= QuicServerSession(
-        socket: socket,
-        peerAddress: dg.address,
-        peerPort: dg.port,
-        // ✅ NO prebuilt flight injected
-      );
+      // quicSession ??= QuicServerSession(
+      //   socket: socket,
+      //   // peerAddress: dg.address,
+      //   // peerPort: dg.port,
+      //   // ✅ NO prebuilt flight injected
+      // );
+      if (!peerSet) {
+        quicSession.peerAddress = dg.address;
+        quicSession.peerPort = dg.port;
+        peerSet = true;
+      }
 
       final packetList = splitCoalescedPackets(dg.data);
       print(packetList.length);

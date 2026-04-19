@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
+import 'fingerprint.dart';
 
 import '../buffer.dart';
 // import '../frames/quic_frames.dart';
@@ -192,15 +193,15 @@ class ServerHandshakeFlight {
 
 class QuicServerSession {
   final RawDatagramSocket socket;
-  final InternetAddress peerAddress;
-  final int peerPort;
+  late final InternetAddress peerAddress;
+  late final int peerPort;
 
   /// This is the server CID that your current client expects to see as DCID
   /// on packets from the server.
-  final Uint8List serverCid = Uint8List.fromList(HEX.decode("635f636964"));
+  // final Uint8List serverCid = Uint8List.fromList(HEX.decode("635f636964"));
 
   /// This becomes the client’s original Initial DCID (000102... in your tests)
-  late Uint8List clientOrigDcid;
+  // late Uint8List clientOrigDcid;
 
   /// The client currently hardcodes this exact ClientHello.
 
@@ -263,8 +264,8 @@ class QuicServerSession {
   bool clientFinishedVerified = false;
   bool applicationSecretsDerived = false;
 
-  final peerScid = Uint8List.fromList(HEX.decode("635f636964"));
-  final localCid = Uint8List.fromList(HEX.decode("0001020304050607"));
+  // final peerScid = Uint8List.fromList(HEX.decode("635f636964"));
+  // final localCid = Uint8List.fromList(HEX.decode("0001020304050607"));
 
   EcdsaCert serverCert = generateSelfSignedCertificate();
   KeyPair keyPair = KeyPair.generate();
@@ -285,9 +286,17 @@ class QuicServerSession {
 
   QuicServerSession({
     required this.socket,
-    required this.peerAddress,
-    required this.peerPort,
-  });
+    // required this.peerAddress,
+    // required this.peerPort,
+  }) {
+    print("Server certificate hash: ${fingerprint(serverCert.fingerPrint)}");
+    localCid = _randomCid(8);
+  }
+
+  Uint8List _randomCid([int len = 8]) {
+    final rnd = math.Random.secure();
+    return Uint8List.fromList(List.generate(len, (_) => rnd.nextInt(256)));
+  }
 
   // QuicServerSession(this.dcid, this.socket);
 
@@ -318,7 +327,6 @@ class QuicServerSession {
     // --------------------------------------------------
     if (!initialKeysReady) {
       if (packetLevel != EncryptionLevel.initial) {
-        // QUIC rule: ignore non‑Initial packets until Initial keys exist
         print("ℹ️ Ignoring non-Initial packet before initial keys are ready");
         return;
       }
@@ -345,14 +353,14 @@ class QuicServerSession {
     final decrypted = decryptPacket(pkt, packetLevel);
 
     // --------------------------------------------------
-    // 4. ACK handling and packet number tracking
+    // 4. Parse payload and decide if packet is ack-eliciting
     // --------------------------------------------------
-    _onDecryptedPacket(decrypted, packetLevel);
+    final ackEliciting = _parsePayload(decrypted.plaintext!, packetLevel);
 
     // --------------------------------------------------
-    // 5. Parse decrypted payload
+    // 5. ACK scheduling happens in ONE place only
     // --------------------------------------------------
-    _parsePayload(decrypted.plaintext!, packetLevel);
+    _onDecryptedPacket(decrypted, packetLevel, ackEliciting);
   }
   // ============================================================
   // Level detection
@@ -383,18 +391,96 @@ class QuicServerSession {
   // Initial secrets
   // ============================================================
 
+  // void _deriveInitialKeysFromFirstPacket(Uint8List pkt) {
+  //   final cids = _extractLongHeaderCids(pkt);
+  //   clientOrigDcid = cids.$1;
+
+  //   final initialSalt = Uint8List.fromList(
+  //     HEX.decode("38762cf7f55934b34d179ae6a4c80cadccbb7f0a"),
+  //   );
+
+  //   final initialSecret = hkdfExtract(
+  //     clientOrigDcid, // ikm
+  //     salt: initialSalt,
+  //   );
+
+  //   final clientSecret = hkdfExpandLabel(
+  //     secret: initialSecret,
+  //     label: "client in",
+  //     context: Uint8List(0),
+  //     length: 32,
+  //   );
+
+  //   final serverSecret = hkdfExpandLabel(
+  //     secret: initialSecret,
+  //     label: "server in",
+  //     context: Uint8List(0),
+  //     length: 32,
+  //   );
+
+  //   final clientKey = hkdfExpandLabel(
+  //     secret: clientSecret,
+  //     label: "quic key",
+  //     context: Uint8List(0),
+  //     length: 16,
+  //   );
+  //   final clientIv = hkdfExpandLabel(
+  //     secret: clientSecret,
+  //     label: "quic iv",
+  //     context: Uint8List(0),
+  //     length: 12,
+  //   );
+  //   final clientHp = hkdfExpandLabel(
+  //     secret: clientSecret,
+  //     label: "quic hp",
+  //     context: Uint8List(0),
+  //     length: 16,
+  //   );
+
+  //   final serverKey = hkdfExpandLabel(
+  //     secret: serverSecret,
+  //     label: "quic key",
+  //     context: Uint8List(0),
+  //     length: 16,
+  //   );
+  //   final serverIv = hkdfExpandLabel(
+  //     secret: serverSecret,
+  //     label: "quic iv",
+  //     context: Uint8List(0),
+  //     length: 12,
+  //   );
+  //   final serverHp = hkdfExpandLabel(
+  //     secret: serverSecret,
+  //     label: "quic hp",
+  //     context: Uint8List(0),
+  //     length: 16,
+  //   );
+
+  //   // Server reads client Initial, writes server Initial
+  //   initialRead = QuicKeys(key: clientKey, iv: clientIv, hp: clientHp);
+  //   initialWrite = QuicKeys(key: serverKey, iv: serverIv, hp: serverHp);
+
+  //   initialKeysReady = true;
+
+  //   print("✅ Server Initial keys ready");
+  //   print("  initialRead : $initialRead");
+  //   print("  initialWrite: $initialWrite");
+  // }
+
   void _deriveInitialKeysFromFirstPacket(Uint8List pkt) {
     final cids = _extractLongHeaderCids(pkt);
+
+    // Client's Original Destination CID (used for Initial secrets)
     clientOrigDcid = cids.$1;
+
+    // Client's Source CID (used as DCID on packets we send back)
+    peerScid = cids.$2;
 
     final initialSalt = Uint8List.fromList(
       HEX.decode("38762cf7f55934b34d179ae6a4c80cadccbb7f0a"),
     );
 
-    final initialSecret = hkdfExtract(
-      clientOrigDcid, // ikm
-      salt: initialSalt,
-    );
+    final initialSecret = hkdfExtract(clientOrigDcid, salt: initialSalt);
 
     final clientSecret = hkdfExpandLabel(
       secret: initialSecret,
@@ -457,6 +543,9 @@ class QuicServerSession {
     print("✅ Server Initial keys ready");
     print("  initialRead : $initialRead");
     print("  initialWrite: $initialWrite");
+    print("  clientOrigDcid: ${HEX.encode(clientOrigDcid)}");
+    print("  peerScid      : ${HEX.encode(peerScid)}");
+    print("  localCid      : ${HEX.encode(localCid)}");
   }
 
   (Uint8List, Uint8List) _extractLongHeaderCids(Uint8List pkt) {
@@ -488,10 +577,21 @@ class QuicServerSession {
       throw StateError("No read keys for $level");
     }
 
+    // ============================================================
+    // QUIC DCID selection for packet decryption
+    // ============================================================
+    // Initial:
+    //   Use the client's Original Destination CID
+    //   (this is what Initial secrets are derived from)
+    //
+    // Handshake / Application:
+    //   Use the server's own chosen CID (localCid),
+    //   because the client now sends packets addressed to the server CID.
+    // ============================================================
     final dcidForLevel = switch (level) {
       EncryptionLevel.initial => clientOrigDcid,
-      EncryptionLevel.handshake => serverCid,
-      EncryptionLevel.application => serverCid,
+      EncryptionLevel.handshake => localCid,
+      EncryptionLevel.application => localCid,
     };
 
     final pnSpace = recvPnSpaces[level]!;
@@ -509,7 +609,9 @@ class QuicServerSession {
       throw StateError("Decryption failed for $level");
     }
 
+    // Update packet number space only after successful decryption
     pnSpace.onPacketDecrypted(result.packetNumber);
+
     return result;
   }
 
@@ -517,15 +619,26 @@ class QuicServerSession {
   // ACK handling
   // ============================================================
 
-  void _onDecryptedPacket(QuicDecryptedPacket pkt, EncryptionLevel level) {
+  void _onDecryptedPacket(
+    QuicDecryptedPacket pkt,
+    EncryptionLevel level,
+    bool ackEliciting,
+  ) {
+    // Track all received packet numbers in that PN space
     ackStates[level]!.received.add(pkt.packetNumber);
 
-    // ✅ After handshake, ALL ACKs must be application-level (short header)
+    // ACK only if the packet was ack-eliciting
+    if (!ackEliciting) {
+      return;
+    }
+
+    // After handshake completion, all ACKs must be sent at application level
     if (handshakeComplete) {
       sendAck(level: EncryptionLevel.application);
       return;
     }
 
+    // Before handshake completion, ACK in the same level/space
     if (level == EncryptionLevel.initial ||
         level == EncryptionLevel.handshake) {
       sendAck(level: level);
@@ -640,26 +753,60 @@ class QuicServerSession {
     );
   }
 
+  late Uint8List peerScid; // client's source CID (from first Initial)
+  late Uint8List localCid; // server's chosen CID
+  late Uint8List clientOrigDcid;
+
   // ============================================================
   // Payload / CRYPTO parsing
   // ============================================================
 
-  void _parsePayload(Uint8List plaintext, EncryptionLevel level) {
+  /// =============================================================
+  /// Hardened server-side QUIC payload parser
+  ///  - Exhaustion-driven (no sentinel bytes)
+  ///  - Correct ACK (0x02) and ACK+ECN (0x03) handling
+  ///  - Correctly identifies ack-eliciting packets
+  ///  - Prevents ACK-of-ACK loops
+  /// =============================================================
+
+  bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
     print('--- Parsing Decrypted QUIC Payload (server) ---');
 
     final buffer = QuicBuffer(data: plaintext);
+    bool ackEliciting = false;
 
     try {
-      while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
+      while (buffer.remaining > 0) {
         final frameType = buffer.pullVarInt();
 
-        // CRYPTO
+        // =========================================================
+        // PADDING (0x00) — single byte, not ack-eliciting
+        // =========================================================
+        if (frameType == 0x00) {
+          continue;
+        }
+
+        // =========================================================
+        // CRYPTO (0x06) — ack-eliciting
+        // =========================================================
         if (frameType == 0x06) {
+          if (buffer.remaining == 0) break;
           final offset = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
           final length = buffer.pullVarInt();
+
+          if (buffer.remaining < length) {
+            print(
+              '🛑 Server CRYPTO frame truncated: need $length, have ${buffer.remaining}',
+            );
+            break;
+          }
+
           final data = buffer.pullBytes(length);
 
-          print("✅ Server parsed CRYPTO frame offset=$offset len=$length");
+          print('✅ Server parsed CRYPTO frame offset=$offset len=$length');
+          ackEliciting = true;
 
           cryptoChunksByLevel[level]![offset] = data;
           final assembled = assembleCryptoStream(level);
@@ -673,41 +820,77 @@ class QuicServerSession {
               _maybeHandleClientFinished();
             }
           }
+          continue;
         }
-        // ACK
-        else if (frameType == 0x02) {
+
+        // =========================================================
+        // ACK (0x02) / ACK + ECN (0x03) — NOT ack-eliciting
+        // =========================================================
+        if (frameType == 0x02 || frameType == 0x03) {
           final hasEcn = (frameType & 0x01) == 0x01;
+
+          if (buffer.remaining == 0) break;
           final largest = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
           final delay = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
           final rangeCount = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
           final firstRange = buffer.pullVarInt();
 
           for (int i = 0; i < rangeCount; i++) {
+            if (buffer.remaining == 0) break;
             buffer.pullVarInt(); // gap
+
+            if (buffer.remaining == 0) break;
             buffer.pullVarInt(); // len
           }
 
           if (hasEcn) {
-            buffer.pullVarInt();
-            buffer.pullVarInt();
-            buffer.pullVarInt();
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ect0
+
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ect1
+
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ce
           }
 
           print(
-            "✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange",
+            '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
           );
-        } else {
-          print(
-            "ℹ️ Server skipping frame type 0x${frameType.toRadixString(16)}",
-          );
+          continue;
         }
+
+        // =========================================================
+        // Unknown / unsupported frame — stop safely
+        // =========================================================
+        print(
+          'ℹ️ Server stopping on unsupported frame type 0x${frameType.toRadixString(16)}',
+        );
+        break;
       }
     } catch (e, st) {
-      print("🛑 Server payload parse error: $e\n$st");
+      print('🛑 Server payload parse error: $e\n$st');
     }
 
-    print("🎉 Server payload parsing complete.");
+    print('🎉 Server payload parsing complete.');
+    return ackEliciting;
   }
+
+  /// =============================================================
+  /// IMPORTANT CALLER-SIDE RULE
+  /// Only send ACKs for ack-eliciting packets
+  /// =============================================================
+  ///
+  /// final ackEliciting = _parsePayload(plaintext, level);
+  /// if (ackEliciting) {
+  ///   sendAck(level: level);
+  /// }
 
   Uint8List assembleCryptoStream(EncryptionLevel level) {
     final chunks = cryptoChunksByLevel[level]!;
@@ -1016,12 +1199,6 @@ class QuicServerSession {
       verifyData.length,
       ...verifyData,
     ]);
-    // print("clientHelloMsg:      ${HEX.encode(clientHelloMsg!)}");
-    // print("serverHelloMsg:      ${HEX.encode(serverHelloMsg!)}");
-    // print("encryptedExtensions: ${HEX.encode(encryptedExtensions)}");
-    // print("certificate:         ${HEX.encode(certificate)}");
-    // print("certificateVerify:   ${HEX.encode(certificateVerify)}");
-    // print("serverFinishedBytes: ${HEX.encode(serverFinishedBytes!)}");
 
     transcriptThroughServerFinishedBytes = Uint8List.fromList([
       ...clientHelloMsg!,
@@ -1038,7 +1215,11 @@ class QuicServerSession {
 
     // --------------------------------------------------
     // 2. Send ServerHello in INITIAL packet
-    //    (Initial CRYPTO stream, offset = 0)
+    //    Initial CRYPTO stream offset = 0
+    //
+    // QUIC CID rules:
+    //   DCID = client's SCID from the Initial packet (peerScid)
+    //   SCID = server's chosen CID (localCid)
     // --------------------------------------------------
     {
       final crypto = buildCryptoFrameAt(0, serverHelloMsg!);
@@ -1051,8 +1232,8 @@ class QuicServerSession {
         initialWrite!.iv,
         initialWrite!.hp,
         pn,
-        serverCid, // SCID (server)
-        peerScid, // DCID (client)
+        peerScid, // ✅ DCID = client's SCID (may be empty)
+        localCid, // ✅ SCID = server CID
         Uint8List(0),
       );
 
@@ -1061,14 +1242,21 @@ class QuicServerSession {
       }
 
       socket.send(raw, peerAddress, peerPort);
-      print("✅ Server sent Initial(ServerHello) pn=$pn");
+      print(
+        "✅ Server sent Initial(ServerHello) pn=$pn "
+        "dcid=${HEX.encode(peerScid)} scid=${HEX.encode(localCid)}",
+      );
     }
 
     // --------------------------------------------------
     // 3. Send remaining handshake messages
-    //    (Handshake CRYPTO stream, offset starts at 0 ✅)
+    //    Handshake CRYPTO stream starts at offset 0
+    //
+    // Same CID rule:
+    //   DCID = peerScid
+    //   SCID = localCid
     // --------------------------------------------------
-    int offset = 0; // ✅ CRITICAL FIX
+    int offset = 0;
 
     void sendHandshake(Uint8List msg) {
       final crypto = buildCryptoFrameAt(offset, msg);
@@ -1081,8 +1269,8 @@ class QuicServerSession {
         handshakeWrite!.iv,
         handshakeWrite!.hp,
         pn,
-        serverCid, // SCID
-        peerScid, // DCID
+        peerScid, // ✅ DCID = client's SCID
+        localCid, // ✅ SCID = server CID
         Uint8List(0),
       );
 
@@ -1091,7 +1279,10 @@ class QuicServerSession {
       }
 
       socket.send(raw, peerAddress, peerPort);
-      print("✅ Server sent Handshake pn=$pn offset=$offset len=${msg.length}");
+      print(
+        "✅ Server sent Handshake pn=$pn offset=$offset len=${msg.length} "
+        "dcid=${HEX.encode(peerScid)} scid=${HEX.encode(localCid)}",
+      );
 
       offset += msg.length;
     }
