@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
@@ -117,8 +118,81 @@ class QuicSession {
 
   late final Uint8List derivedSecret;
 
-  final peerScid = Uint8List.fromList(HEX.decode("635f636964"));
-  final localCid = Uint8List.fromList(HEX.decode("0001020304050607"));
+  /// Original Destination CID chosen by the client for the first Initial.
+  /// Used for Initial secret derivation only.
+
+  /// Client's own Source CID.
+  /// This is what the server will use as DCID when replying in long headers.
+  late Uint8List localCid;
+
+  /// Learned from the first server long-header packet SCID.
+  /// This becomes the DCID for packets the client sends after that.
+  Uint8List? peerCid;
+  // void sendAck({
+  //   required EncryptionLevel level,
+  //   required String address,
+  //   required int port,
+  // }) {
+  //   final ackState = ackStates[level];
+  //   if (ackState == null || ackState.received.isEmpty) {
+  //     return;
+  //   }
+
+  //   final ackFrame = buildAckFromSet(
+  //     ackState.received,
+  //     ackDelayMicros: 0, // Immediate ACK for Initial + Handshake
+  //     ect0: 0,
+  //     ect1: 0,
+  //     ce: 0,
+  //   );
+
+  //   final ackPayload = ackFrame.encode();
+  //   final pn = ackState.allocatePn();
+
+  //   // Select correct keys for this encryption level
+  //   final writeKeys = switch (level) {
+  //     EncryptionLevel.initial => initialWrite,
+  //     EncryptionLevel.handshake => handshakeWrite,
+  //     _ => throw StateError("ACK not supported for $level"),
+  //   };
+
+  //   if (writeKeys == null) {
+  //     throw StateError("Write keys not available for $level");
+  //   }
+
+  //   // DCID = peer's SCID, SCID = our CID
+
+  //   final Uint8List dcidToUse = peerCid ?? Uint8List(0);
+  //   final Uint8List scidToUse = localCid;
+
+  //   final rawPacket = encryptQuicPacket(
+  //     level.name,
+  //     ackPayload,
+  //     writeKeys.key,
+  //     writeKeys.iv,
+  //     writeKeys.hp,
+  //     pn,
+  //     dcidToUse,
+  //     scidToUse,
+  //     Uint8List(0), // no tokens
+  //   );
+
+  //   if (rawPacket == null) {
+  //     print("❌ Failed to encrypt ACK ($level)");
+  //     return;
+  //   }
+
+  //   final bytesToSend = level == EncryptionLevel.initial
+  //       ? _padTo1200(rawPacket)
+  //       : rawPacket;
+
+  //   socket.send(bytesToSend, InternetAddress("127.0.0.1"), 4433);
+
+  //   print(
+  //     "✅ Sent ACK ($level) pn=$pn acked=${ackState.received.toList()..sort()}",
+  //   );
+  // }
+
   void sendAck({
     required EncryptionLevel level,
     required String address,
@@ -131,7 +205,7 @@ class QuicSession {
 
     final ackFrame = buildAckFromSet(
       ackState.received,
-      ackDelayMicros: 0, // Immediate ACK for Initial + Handshake
+      ackDelayMicros: 0,
       ect0: 0,
       ect1: 0,
       ce: 0,
@@ -140,23 +214,22 @@ class QuicSession {
     final ackPayload = ackFrame.encode();
     final pn = ackState.allocatePn();
 
-    // Select correct keys for this encryption level
     final writeKeys = switch (level) {
       EncryptionLevel.initial => initialWrite,
       EncryptionLevel.handshake => handshakeWrite,
-      _ => throw StateError("ACK not supported for $level"),
+      EncryptionLevel.application => appWrite,
     };
 
     if (writeKeys == null) {
       throw StateError("Write keys not available for $level");
     }
 
-    // DCID = peer's SCID, SCID = our CID
-    final Uint8List dcidToUse = peerScid; // server's CID
-    final Uint8List scidToUse = localCid; // our CID
+    // Use the learned server CID as DCID once known.
+    final Uint8List dcidToUse = peerCid ?? Uint8List(0);
+    final Uint8List scidToUse = localCid;
 
     final rawPacket = encryptQuicPacket(
-      level.name,
+      level == EncryptionLevel.application ? "short" : level.name,
       ackPayload,
       writeKeys.key,
       writeKeys.iv,
@@ -164,7 +237,7 @@ class QuicSession {
       pn,
       dcidToUse,
       scidToUse,
-      Uint8List(0), // no tokens
+      Uint8List(0),
     );
 
     if (rawPacket == null) {
@@ -176,12 +249,152 @@ class QuicSession {
         ? _padTo1200(rawPacket)
         : rawPacket;
 
-    socket.send(bytesToSend, InternetAddress("127.0.0.1"), 4433);
+    socket.send(bytesToSend, InternetAddress(address), port);
 
     print(
-      "✅ Sent ACK ($level) pn=$pn acked=${ackState.received.toList()..sort()}",
+      "✅ Sent ACK ($level) pn=$pn "
+      "dcid=${HEX.encode(dcidToUse)} scid=${HEX.encode(scidToUse)} "
+      "acked=${ackState.received.toList()..sort()}",
     );
   }
+
+  (Uint8List, Uint8List) _extractLongHeaderCids(Uint8List pkt) {
+    int off = 1; // first byte
+    off += 4; // version
+
+    final dcidLen = pkt[off++];
+    final packetDcid = pkt.sublist(off, off + dcidLen);
+    off += dcidLen;
+
+    final scidLen = pkt[off++];
+    final packetScid = pkt.sublist(off, off + scidLen);
+
+    return (packetDcid, packetScid);
+  }
+
+  void _maybeLearnPeerCid(Uint8List pkt) {
+    final isLong = (pkt[0] & 0x80) != 0;
+    if (!isLong) return;
+
+    final (packetDcid, packetScid) = _extractLongHeaderCids(pkt);
+
+    // Sanity: server packets should usually target our localCid in DCID.
+    if (!_bytesEq.equals(packetDcid, localCid)) {
+      print(
+        "ℹ️ Server packet DCID=${HEX.encode(packetDcid)} "
+        "does not match localCid=${HEX.encode(localCid)}",
+      );
+    }
+
+    if (peerCid == null || !_bytesEq.equals(peerCid!, packetScid)) {
+      peerCid = Uint8List.fromList(packetScid);
+      print("✅ Learned server CID: ${HEX.encode(peerCid!)}");
+    }
+  }
+
+  // void sendClientFinished({
+  //   required InternetAddress address,
+  //   required int port,
+  // }) {
+  //   if (handshakeWrite == null) {
+  //     throw StateError("Handshake write keys not available");
+  //   }
+
+  //   // =====================================================
+  //   // 1. Compute transcript hash (up to CertificateVerify)
+  //   // =====================================================
+  //   final transcriptHash = createHash(
+  //     Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
+  //   );
+
+  //   // =====================================================
+  //   // 2. Derive finished_key
+  //   // finished_key =
+  //   // HKDF-Expand-Label(
+  //   //   client_hs_traffic_secret,
+  //   //   "finished",
+  //   //   "",
+  //   //   Hash.length
+  //   // )
+  //   // =====================================================
+  //   final finishedKey = hkdfExpandLabel(
+  //     secret: clientHsTrafficSecret,
+  //     label: "finished",
+  //     context: Uint8List(0),
+  //     length: 32, // SHA-256
+  //   );
+
+  //   // =====================================================
+  //   // 3. Compute verify_data
+  //   // verify_data = HMAC(finished_key, transcript_hash)
+  //   // =====================================================
+  //   final verifyData = hmacSha256(key: finishedKey, data: transcriptHash);
+
+  //   // =====================================================
+  //   // 4. Build TLS Finished handshake message
+  //   // HandshakeType.finished = 20 (0x14)
+  //   // =====================================================
+  //   final finishedHandshake = BytesBuilder()
+  //     ..addByte(0x14)
+  //     ..add([
+  //       (verifyData.length >> 16) & 0xff,
+  //       (verifyData.length >> 8) & 0xff,
+  //       verifyData.length & 0xff,
+  //     ])
+  //     ..add(verifyData);
+
+  //   final finishedBytes = finishedHandshake.toBytes();
+
+  //   // IMPORTANT: append Finished to transcript AFTER computing verify_data
+  //   // tlsTranscript.add(finishedBytes);
+  //   // print("client hello: ${HEX.encode(tlsTranscript.toBytes())}");
+  //   // print("client hello: ${HEX.encode(serverHelloMsg!)}");
+  //   // print("client hello: ${HEX.encode(encryptedExtensions)}");
+  //   // print("client hello: ${HEX.encode(certificate)}");
+  //   // print("client hello: ${HEX.encode(certificateVerify)}");
+  //   // print("client hello: ${HEX.encode(serverFinishedBytes!)}");
+
+  //   // =====================================================
+  //   // 5. Wrap in CRYPTO frame (using your helper)
+  //   // =====================================================
+  //   final cryptoPayload = buildCryptoFrame(finishedBytes);
+
+  //   // =====================================================
+  //   // 6. Allocate packet number (Handshake PN space)
+  //   // =====================================================
+  //   final ackState = ackStates[EncryptionLevel.handshake]!;
+  //   final pn = ackState.allocatePn();
+
+  //   // =====================================================
+  //   // 7. Encrypt Handshake packet
+  //   // =====================================================
+  //   final rawPacket = encryptQuicPacket(
+  //     "handshake",
+  //     cryptoPayload,
+  //     handshakeWrite!.key,
+  //     handshakeWrite!.iv,
+  //     handshakeWrite!.hp,
+  //     pn,
+  //     peerScid, // DCID = server's CID
+  //     localCid, // SCID = our CID
+  //     Uint8List(0),
+  //   );
+
+  //   if (rawPacket == null) {
+  //     print("❌ Failed to encrypt Client Finished");
+  //     return;
+  //   }
+
+  //   // =====================================================
+  //   // 8. Send (NO padding for Handshake packets)
+  //   // =====================================================
+  //   socket.send(rawPacket, address, port);
+
+  //   print(
+  //     "✅ Sent Client Finished (Handshake) "
+  //     "pn=$pn verify_data=${HEX.encode(verifyData)}",
+  //   );
+  // }
 
   void sendClientFinished({
     required InternetAddress address,
@@ -191,40 +404,19 @@ class QuicSession {
       throw StateError("Handshake write keys not available");
     }
 
-    // =====================================================
-    // 1. Compute transcript hash (up to CertificateVerify)
-    // =====================================================
     final transcriptHash = createHash(
       Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
     );
 
-    // =====================================================
-    // 2. Derive finished_key
-    // finished_key =
-    // HKDF-Expand-Label(
-    //   client_hs_traffic_secret,
-    //   "finished",
-    //   "",
-    //   Hash.length
-    // )
-    // =====================================================
     final finishedKey = hkdfExpandLabel(
       secret: clientHsTrafficSecret,
       label: "finished",
       context: Uint8List(0),
-      length: 32, // SHA-256
+      length: 32,
     );
 
-    // =====================================================
-    // 3. Compute verify_data
-    // verify_data = HMAC(finished_key, transcript_hash)
-    // =====================================================
     final verifyData = hmacSha256(key: finishedKey, data: transcriptHash);
 
-    // =====================================================
-    // 4. Build TLS Finished handshake message
-    // HandshakeType.finished = 20 (0x14)
-    // =====================================================
     final finishedHandshake = BytesBuilder()
       ..addByte(0x14)
       ..add([
@@ -235,30 +427,11 @@ class QuicSession {
       ..add(verifyData);
 
     final finishedBytes = finishedHandshake.toBytes();
-
-    // IMPORTANT: append Finished to transcript AFTER computing verify_data
-    // tlsTranscript.add(finishedBytes);
-    // print("client hello: ${HEX.encode(tlsTranscript.toBytes())}");
-    // print("client hello: ${HEX.encode(serverHelloMsg!)}");
-    // print("client hello: ${HEX.encode(encryptedExtensions)}");
-    // print("client hello: ${HEX.encode(certificate)}");
-    // print("client hello: ${HEX.encode(certificateVerify)}");
-    // print("client hello: ${HEX.encode(serverFinishedBytes!)}");
-
-    // =====================================================
-    // 5. Wrap in CRYPTO frame (using your helper)
-    // =====================================================
     final cryptoPayload = buildCryptoFrame(finishedBytes);
 
-    // =====================================================
-    // 6. Allocate packet number (Handshake PN space)
-    // =====================================================
     final ackState = ackStates[EncryptionLevel.handshake]!;
     final pn = ackState.allocatePn();
 
-    // =====================================================
-    // 7. Encrypt Handshake packet
-    // =====================================================
     final rawPacket = encryptQuicPacket(
       "handshake",
       cryptoPayload,
@@ -266,8 +439,8 @@ class QuicSession {
       handshakeWrite!.iv,
       handshakeWrite!.hp,
       pn,
-      peerScid, // DCID = server's CID
-      localCid, // SCID = our CID
+      peerCid ?? Uint8List(0), // learned server CID
+      localCid,
       Uint8List(0),
     );
 
@@ -276,14 +449,13 @@ class QuicSession {
       return;
     }
 
-    // =====================================================
-    // 8. Send (NO padding for Handshake packets)
-    // =====================================================
     socket.send(rawPacket, address, port);
 
     print(
       "✅ Sent Client Finished (Handshake) "
-      "pn=$pn verify_data=${HEX.encode(verifyData)}",
+      "pn=$pn dcid=${HEX.encode(peerCid ?? Uint8List(0))} "
+      "scid=${HEX.encode(localCid)} "
+      "verify_data=${HEX.encode(verifyData)}",
     );
   }
 
@@ -303,6 +475,11 @@ class QuicSession {
   QuicSession(this.dcid, this.socket) {
     generateSecrets();
     _readKeys[EncryptionLevel.initial] = initialRead!;
+    localCid = _randomCid(8);
+  }
+  Uint8List _randomCid([int len = 8]) {
+    final rnd = math.Random.secure();
+    return Uint8List.fromList(List.generate(len, (_) => rnd.nextInt(256)));
   }
 
   final randomData = Uint8List.fromList(HEX.decode("0001020304050607"));
@@ -506,15 +683,66 @@ class QuicSession {
   //   return result;
   // }
 
+  // QuicDecryptedPacket decryptPacket(Uint8List packet, EncryptionLevel _unused) {
+  //   // --------------------------------------------------
+  //   // ✅ Determine encryption level FROM THE PACKET HEADER
+  //   // --------------------------------------------------
+  //   final firstByte = packet[0];
+  //   late final EncryptionLevel level;
+
+  //   if ((firstByte & 0x80) != 0) {
+  //     // LONG HEADER → Initial or Handshake
+  //     final longType = parseLongHeaderType(packet);
+
+  //     if (longType == LongPacketType.initial) {
+  //       level = EncryptionLevel.initial;
+  //     } else if (longType == LongPacketType.handshake) {
+  //       level = EncryptionLevel.handshake;
+  //     } else {
+  //       // Retry / 0-RTT not supported in this stack
+  //       throw StateError('Unsupported long-header packet type: $longType');
+  //     }
+  //   } else {
+  //     // SHORT HEADER → Application (1-RTT)
+  //     level = EncryptionLevel.application;
+  //   }
+
+  //   final keys = _readKeys[level];
+  //   if (keys == null) {
+  //     // Key phase may already be discarded → drop
+  //     throw StateError('No read keys for $level');
+  //   }
+
+  //   final pnSpace = _pnSpaces[level]!;
+
+  //   final result = decryptQuicPacketBytes2(
+  //     packet,
+  //     keys.key,
+  //     keys.iv,
+  //     keys.hp,
+  //     dcid,
+  //     pnSpace.largestPn, // ✅ do NOT normalize -1
+  //   );
+
+  //   if (result == null) {
+  //     // ✅ RFC 9000: silently drop packets that fail auth
+  //     throw StateError('Decryption failed');
+  //   }
+
+  //   // ✅ Update PN space ONLY after successful decryption
+  //   pnSpace.onPacketDecrypted(result.packetNumber);
+
+  //   return result;
+  // }
+
   QuicDecryptedPacket decryptPacket(Uint8List packet, EncryptionLevel _unused) {
     // --------------------------------------------------
-    // ✅ Determine encryption level FROM THE PACKET HEADER
+    // Determine encryption level FROM THE PACKET HEADER
     // --------------------------------------------------
     final firstByte = packet[0];
     late final EncryptionLevel level;
 
     if ((firstByte & 0x80) != 0) {
-      // LONG HEADER → Initial or Handshake
       final longType = parseLongHeaderType(packet);
 
       if (longType == LongPacketType.initial) {
@@ -522,39 +750,50 @@ class QuicSession {
       } else if (longType == LongPacketType.handshake) {
         level = EncryptionLevel.handshake;
       } else {
-        // Retry / 0-RTT not supported in this stack
         throw StateError('Unsupported long-header packet type: $longType');
       }
     } else {
-      // SHORT HEADER → Application (1-RTT)
       level = EncryptionLevel.application;
     }
 
     final keys = _readKeys[level];
     if (keys == null) {
-      // Key phase may already be discarded → drop
       throw StateError('No read keys for $level');
     }
 
     final pnSpace = _pnSpaces[level]!;
+
+    // --------------------------------------------------
+    // Choose CID context per level
+    // --------------------------------------------------
+    final Uint8List dcidForPacket = switch (level) {
+      // Initial secrets are tied to the original DCID chosen by the client.
+      EncryptionLevel.initial => dcid,
+
+      // Handshake packets are long-header, so this isn't critical for parsing,
+      // but peerCid is still the correct connection context once learned.
+      EncryptionLevel.handshake => peerCid ?? Uint8List(0),
+
+      // 1-RTT short-header parsing NEEDS the server CID length.
+      EncryptionLevel.application =>
+        peerCid ??
+            (throw StateError('No server CID learned for application packets')),
+    };
 
     final result = decryptQuicPacketBytes2(
       packet,
       keys.key,
       keys.iv,
       keys.hp,
-      dcid,
-      pnSpace.largestPn, // ✅ do NOT normalize -1
+      dcidForPacket,
+      pnSpace.largestPn,
     );
 
     if (result == null) {
-      // ✅ RFC 9000: silently drop packets that fail auth
       throw StateError('Decryption failed');
     }
 
-    // ✅ Update PN space ONLY after successful decryption
     pnSpace.onPacketDecrypted(result.packetNumber);
-
     return result;
   }
 
@@ -1016,7 +1255,11 @@ class QuicSession {
 
   //     print("parsed: $parsed");
   //   }
+
   void handleQuicPacket(Uint8List pkt) {
+    // Learn the server CID from long-header packets before decrypting.
+    _maybeLearnPeerCid(pkt);
+
     final packetLevel = encryptionLevel;
     final previousLevel = encryptionLevel;
 
@@ -1027,25 +1270,19 @@ class QuicSession {
 
     final parsed = parsePayload(result.plaintext!, this, level: packetLevel);
 
-    // 4️⃣ Collect CRYPTO frames (for logging / debugging)
     if (parsed.cryptoFrames.isNotEmpty) {
       receivedCryptoFrames.addAll(parsed.cryptoFrames);
     }
 
-    // 5️⃣ Collect any parsed TLS messages
     if (parsed.tlsMessages.isNotEmpty) {
       receivedTlsMessages.addAll(parsed.tlsMessages);
     }
 
-    // 6️⃣ If ServerHello caused a level transition, derive handshake keys
     if (encryptionLevel != previousLevel &&
         encryptionLevel == EncryptionLevel.handshake) {
       handshakeKeyDerivationTest();
     }
 
-    // ================= TLS / QUIC STATE MACHINE =================
-
-    // Detect whether the received handshake stream now contains a full server Finished
     final bool gotServerFinished = tlsTranscriptContainsFinished();
 
     if (gotServerFinished && !serverFinishedReceived) {
@@ -1053,17 +1290,12 @@ class QuicSession {
       print("🧠 Server Finished processed");
     }
 
-    // ✅ Derive application secrets BEFORE sending client Finished
-    // because your current sendClientFinished() appends the client Finished
-    // to tlsTranscript. Application secrets should be derived from the
-    // transcript THROUGH server Finished.
     if (serverFinishedReceived && !applicationSecretsDerived) {
       deriveApplicationSecrets();
       applicationSecretsDerived = true;
       print("🔐 Application secrets derived");
     }
 
-    // ✅ Send Client Finished exactly once
     if (serverFinishedReceived && !clientFinishedSent) {
       sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
       clientFinishedSent = true;
@@ -1071,6 +1303,17 @@ class QuicSession {
     }
 
     print("parsed: $parsed");
+
+    // ================= TLS / QUIC STATE MACHINE =================
+
+    // Detect whether the received handshake stream now contains a full server Finished
+
+    // ✅ Derive application secrets BEFORE sending client Finished
+    // because your current sendClientFinished() appends the client Finished
+    // to tlsTranscript. Application secrets should be derived from the
+    // transcript THROUGH server Finished.
+
+    // ✅ Send Client Finished exactly once
   }
 }
 
