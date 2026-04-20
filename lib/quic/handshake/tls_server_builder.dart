@@ -25,12 +25,12 @@ import 'package:hex/hex.dart';
 import 'package:crypto/crypto.dart' as crypto;
 
 import '../cipher/ecdsa.dart';
-import '../handshake/server_hello.dart';
+import 'server_hello.dart';
 import '../hash.dart';
 import '../hkdf.dart';
 import '../cipher/x25519.dart';
-import 'cert_utils.dart';
-import 'quic_server_session.dart';
+import '../quic_learn/cert_utils.dart';
+import '../quic_learn/server/quic_server_session.dart';
 
 // =============================================================
 // Constants

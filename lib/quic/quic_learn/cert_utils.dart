@@ -60,7 +60,7 @@ EcdsaCert generateSelfSignedCertificate() {
   var pair = CryptoUtils.generateEcKeyPair();
   var privKey = pair.privateKey as ECPrivateKey;
   var pubKey = pair.publicKey as ECPublicKey;
-  var dn = {'CN': 'Self-Signed'};
+  var dn = {'CN': 'localhost'};
   var csr = X509Utils.generateEccCsrPem(dn, privKey, pubKey);
 
   // Encode private key to PEM
@@ -71,7 +71,7 @@ EcdsaCert generateSelfSignedCertificate() {
   String publicKeyPem = CryptoUtils.encodeEcPublicKeyToPem(pubKey);
   print("Public Key PEM:\n$publicKeyPem\n");
 
-  var x509PEM = X509Utils.generateSelfSignedCertificate(privKey, csr, 365);
+  var x509PEM = X509Utils.generateSelfSignedCertificate(privKey, csr, 13);
 
   // Extract raw public key and private key from the Pointy Castle objects
   Uint8List rawPublicKey = _encodeECPublicKeyToRaw(pubKey);

@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:hex/hex.dart';
 
 import '../buffer.dart';
-import '../quic_learn/quic_server_session.dart';
+import '../quic_learn/server/quic_server_session.dart';
 import 'client_hello.dart';
 import 'tls_messages.dart'; // for TlsHandshakeMessage + maps
 import 'keyshare.dart'; // for ParsedKeyShare

@@ -5,23 +5,23 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
-import 'fingerprint.dart';
+import '../fingerprint.dart';
 
-import '../buffer.dart';
+import '../../buffer.dart';
 // import '../frames/quic_frames.dart';
-import '../handshake/client_hello.dart';
-import '../handshake/server_hello.dart';
-import '../hash.dart';
-import '../hkdf.dart';
-import '../packet/quic_packet.dart';
-import '../quic_ack.dart';
-import '../utils.dart';
-import '../cipher/x25519.dart';
+import '../../handshake/client_hello.dart';
+import '../../handshake/server_hello.dart';
+import '../../hash.dart';
+import '../../hkdf.dart';
+import '../../packet/quic_packet.dart';
+import '../../quic_ack.dart';
+import '../../utils.dart';
+import '../../cipher/x25519.dart';
 
 import 'package:x25519/x25519.dart' as ecdhe;
 
-import 'cert_utils.dart';
-import 'tls_server_builder.dart';
+import '../cert_utils.dart';
+import '../../handshake/tls_server_builder.dart';
 
 class KeyPair {
   final Uint8List _privateKey;

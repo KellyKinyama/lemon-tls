@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import 'package:hex/hex.dart';
-import 'package:lemon_tls/quic/quic_learn/quic_session.dart';
+import 'package:lemon_tls/quic/quic_learn/client/quic_session.dart';
 
 import '../buffer.dart';
 import 'client_hello.dart';
