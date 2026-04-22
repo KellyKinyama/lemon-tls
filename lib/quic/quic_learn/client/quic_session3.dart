@@ -331,6 +331,25 @@ class QuicSession {
     );
   }
 
+  // void onDecryptedPacket(
+  //   QuicDecryptedPacket decryptedPacket,
+  //   EncryptionLevel level,
+  //   InternetAddress address,
+  //   int port,
+  // ) {
+  //   final ackState = ackStates[level];
+  //   if (ackState == null) {
+  //     return;
+  //   }
+
+  //   ackState.received.add(decryptedPacket.packetNumber);
+
+  //   if (level == EncryptionLevel.initial ||
+  //       level == EncryptionLevel.handshake) {
+  //     sendAck(level: level, address: address.address, port: port);
+  //   }
+  // }
+
   void onDecryptedPacket(
     QuicDecryptedPacket decryptedPacket,
     EncryptionLevel level,
@@ -344,10 +363,8 @@ class QuicSession {
 
     ackState.received.add(decryptedPacket.packetNumber);
 
-    if (level == EncryptionLevel.initial ||
-        level == EncryptionLevel.handshake) {
-      sendAck(level: level, address: address.address, port: port);
-    }
+    // ACK every packet number space, including application
+    sendAck(level: level, address: address.address, port: port);
   }
 
   // ===========================================================================
