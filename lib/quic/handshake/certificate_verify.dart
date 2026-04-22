@@ -9,7 +9,7 @@ import 'package:hex/hex.dart';
 // certificate_verify.dart
 import 'dart:typed_data';
 import '../buffer.dart';
-import 'tls_messages.dart';
+import 'tls_msg.dart';
 
 Uint8List _concat(List<Uint8List> items) {
   final total = items.fold<int>(0, (s, b) => s + b.length);

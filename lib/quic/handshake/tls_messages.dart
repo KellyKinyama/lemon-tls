@@ -12,35 +12,7 @@ import 'encrypted_extensions.dart';
 import 'certificate.dart';
 import 'certificate_verify.dart';
 import 'finished.dart';
-
-abstract class TlsHandshakeMessage {
-  final int msgType;
-  String get typeName => handshakeTypeMap[msgType] ?? 'Unknown';
-  TlsHandshakeMessage(this.msgType);
-}
-
-class UnknownHandshakeMessage extends TlsHandshakeMessage {
-  final Uint8List body;
-  UnknownHandshakeMessage(int msgType, this.body) : super(msgType);
-
-  @override
-  String toString() =>
-      'ℹ️ Parsed UnknownHandshake(type: $msgType, len: ${body.length})';
-}
-
-class TlsExtension {
-  final int type;
-  final Uint8List data;
-  int length;
-
-  TlsExtension({required this.type, required this.length, required this.data});
-
-  String get typeName =>
-      extensionTypesMap[type] ?? 'Unknown (0x${type.toRadixString(16)})';
-
-  @override
-  String toString() => '  - Ext: $typeName, Length: ${data.length}';
-}
+import 'tls_msg.dart';
 
 List<TlsHandshakeMessage> parseTlsMessages(
   Uint8List cryptoData, {

@@ -12,7 +12,7 @@ import 'package:hex/hex.dart';
 import '../../cipher/x25519.dart';
 import '../../frames/quic_frames.dart';
 import '../../handshake/server_hello.dart';
-import '../../handshake/tls_messages.dart';
+// import '../../handshake/tls_messages.dart';
 import '../../handshake/tls_msg.dart';
 import '../../hash.dart';
 import '../../hkdf.dart';
@@ -22,7 +22,7 @@ import '../../utils.dart';
 import '../client_hello_builder.dart';
 import '../h31.dart';
 import '../constants.dart';
-import 'payload_parser.dart';
+import 'payload_parser3.dart';
 
 const int H3_FRAME_DATA = 0x00;
 const int H3_FRAME_HEADERS = 0x01;
@@ -144,7 +144,8 @@ class QuicSession {
   final Map<EncryptionLevel, AckState> ackStates = {
     EncryptionLevel.initial: AckState(),
     EncryptionLevel.handshake: AckState(),
-    // 1-RTT can be added later
+
+    EncryptionLevel.application: AckState(),
   };
 
   // ---------------------------------------------------------------------------
@@ -156,6 +157,14 @@ class QuicSession {
   // Client-initiated streams
   int nextClientBidiStreamId = 0; // client bidi: 0,4,8,...
   int nextClientUniStreamId = 2; // client uni: 2,6,10,...
+
+  // ---------------------------------------------------------------------------
+  // WebTransport test state
+  // ---------------------------------------------------------------------------
+
+  bool webTransportConnectSent = false;
+  bool webTransportDatagramSent = false;
+  int? activeWebTransportSessionId;
 
   QuicSession(this.dcid, this.socket) {
     generateSecrets();
@@ -1014,6 +1023,23 @@ class QuicSession {
     }
   }
 
+  // void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
+  //   if (frameType == H3_FRAME_SETTINGS) {
+  //     final settings = parse_h3_settings_frame(payload);
+  //     h3.peerSettings
+  //       ..clear()
+  //       ..addAll(settings);
+  //     h3.settingsReceived = true;
+
+  //     print('✅ Received HTTP/3 SETTINGS from server: $settings');
+  //     return;
+  //   }
+
+  //   print(
+  //     'ℹ️ Ignoring unsupported control-stream frame '
+  //     '0x${frameType.toRadixString(16)}',
+  //   );
+  // }
   void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
     if (frameType == H3_FRAME_SETTINGS) {
       final settings = parse_h3_settings_frame(payload);
@@ -1023,6 +1049,26 @@ class QuicSession {
       h3.settingsReceived = true;
 
       print('✅ Received HTTP/3 SETTINGS from server: $settings');
+
+      // --------------------------------------------------------
+      // WebTransport test trigger:
+      // As soon as SETTINGS arrive, open a WT CONNECT stream.
+      // --------------------------------------------------------
+      if (!webTransportConnectSent) {
+        final sessionId = openWebTransportSession(
+          '/wt',
+          authority: 'localhost',
+          scheme: 'https',
+          address: InternetAddress('127.0.0.1'),
+          port: 4433,
+        );
+
+        activeWebTransportSessionId = sessionId;
+        webTransportConnectSent = true;
+
+        print('🧪 WebTransport test: CONNECT sent on stream $sessionId');
+      }
+
       return;
     }
 
@@ -1054,6 +1100,28 @@ class QuicSession {
       if (wt != null && status == '200') {
         wt.established = true;
         print('✅ WebTransport session established on stream $streamId');
+
+        // ------------------------------------------------------
+        // WebTransport test trigger:
+        // Send one datagram immediately after CONNECT succeeds.
+        // ------------------------------------------------------
+        if (!webTransportDatagramSent) {
+          final testData = Uint8List.fromList([0x01, 0x02, 0x03, 0x04]);
+
+          sendWebTransportDatagram(
+            streamId,
+            testData,
+            address: InternetAddress('127.0.0.1'),
+            port: 4433,
+          );
+
+          webTransportDatagramSent = true;
+
+          print(
+            '🧪 WebTransport test: DATAGRAM sent '
+            'session=$streamId hex=${HEX.encode(testData)}',
+          );
+        }
       }
 
       return;
@@ -1069,6 +1137,78 @@ class QuicSession {
       '0x${frameType.toRadixString(16)} on stream=$streamId',
     );
   }
+  // void _handleHttp3RequestStreamFrame(
+  //   int streamId,
+  //   int frameType,
+  //   Uint8List payload,
+  // ) {
+  //   if (frameType == H3_FRAME_HEADERS) {
+  //     final headers = decode_qpack_header_fields(payload);
+
+  //     String status = '';
+  //     for (final h in headers) {
+  //       if (h.name == ':status') status = h.value;
+  //     }
+
+  //     print('📥 HTTP/3 HEADERS on stream $streamId status=$status');
+  //     for (final h in headers) {
+  //       print('   ${h.name}: ${h.value}');
+  //     }
+
+  //     final wt = h3.webTransportSessions[streamId];
+  //     if (wt != null && status == '200') {
+  //       wt.established = true;
+  //       print('✅ WebTransport session established on stream $streamId');
+  //     }
+
+  //     return;
+  //   }
+
+  //   if (frameType == H3_FRAME_DATA) {
+  //     print('📦 HTTP/3 DATA on stream=$streamId len=${payload.length}');
+  //     return;
+  //   }
+
+  //   print(
+  //     'ℹ️ Ignoring unsupported request-stream frame '
+  //     '0x${frameType.toRadixString(16)} on stream=$streamId',
+  //   );
+  // }
+
+  // int openWebTransportSession(
+  //   String path, {
+  //   String authority = 'localhost',
+  //   String scheme = 'https',
+  //   InternetAddress? address,
+  //   int port = 4433,
+  // }) {
+  //   final streamId = _allocateClientBidiStreamId();
+
+  //   h3.webTransportSessions[streamId] = ClientWebTransportSession(streamId);
+
+  //   final headerBlock = build_http3_literal_headers_frame({
+  //     ':method': 'CONNECT',
+  //     ':scheme': scheme,
+  //     ':authority': authority,
+  //     ':path': path,
+  //     ':protocol': WT_PROTOCOL,
+  //   });
+
+  //   final frames = build_h3_frames([
+  //     {'frame_type': H3_FRAME_HEADERS, 'payload': headerBlock},
+  //   ]);
+
+  //   sendApplicationStream(
+  //     streamId,
+  //     frames,
+  //     fin: false,
+  //     address: address,
+  //     port: port,
+  //   );
+
+  //   print('🚀 Sent WebTransport CONNECT on stream $streamId path=$path');
+  //   return streamId;
+  // }
 
   int openWebTransportSession(
     String path, {
@@ -1078,6 +1218,11 @@ class QuicSession {
     int port = 4433,
   }) {
     final streamId = _allocateClientBidiStreamId();
+
+    if (h3.webTransportSessions.containsKey(streamId)) {
+      print('ℹ️ WebTransport session already exists on stream $streamId');
+      return streamId;
+    }
 
     h3.webTransportSessions[streamId] = ClientWebTransportSession(streamId);
 
@@ -1104,7 +1249,22 @@ class QuicSession {
     print('🚀 Sent WebTransport CONNECT on stream $streamId path=$path');
     return streamId;
   }
+  // void handleWebTransportDatagram(Uint8List datagramPayload) {
+  //   final parsed = parse_webtransport_datagram(datagramPayload);
+  //   final int sessionId = parsed['stream_id'] as int;
+  //   final Uint8List data = parsed['data'] as Uint8List;
 
+  //   final session = h3.webTransportSessions[sessionId];
+  //   if (session == null) {
+  //     print('⚠️ Datagram for unknown WebTransport session $sessionId');
+  //     return;
+  //   }
+
+  //   print(
+  //     '📦 Received WebTransport DATAGRAM '
+  //     'session=$sessionId len=${data.length} hex=${HEX.encode(data)}',
+  //   );
+  // }
   void handleWebTransportDatagram(Uint8List datagramPayload) {
     final parsed = parse_webtransport_datagram(datagramPayload);
     final int sessionId = parsed['stream_id'] as int;
@@ -1120,6 +1280,15 @@ class QuicSession {
       '📦 Received WebTransport DATAGRAM '
       'session=$sessionId len=${data.length} hex=${HEX.encode(data)}',
     );
+
+    // Optional test verification
+    if (data.length == 4 &&
+        data[0] == 0x01 &&
+        data[1] == 0x02 &&
+        data[2] == 0x03 &&
+        data[3] == 0x04) {
+      print('✅ WebTransport echo test passed');
+    }
   }
 
   void sendWebTransportDatagram(

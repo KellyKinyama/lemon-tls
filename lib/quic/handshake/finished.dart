@@ -2,7 +2,7 @@ import 'dart:typed_data';
 // finished.dart
 import 'dart:typed_data';
 import '../buffer.dart';
-import 'tls_messages.dart';
+import 'tls_msg.dart';
 
 Uint8List buildFinishedMessage(Uint8List verifyData) {
   final length = verifyData.length;

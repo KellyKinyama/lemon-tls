@@ -6,7 +6,7 @@ import 'package:hex/hex.dart';
 
 import '../buffer.dart';
 import 'keyshare.dart';
-import 'tls_messages.dart';
+import 'tls_msg.dart';
 
 // =============================================================
 // ALPN helpers

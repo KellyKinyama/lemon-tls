@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 import 'dart:typed_data';
 import '../buffer.dart';
-import 'tls_messages.dart';
+import 'tls_msg.dart';
 
 Uint8List buildCertificateMessage(List<Uint8List> certChain) {
   final builder = BytesBuilder();

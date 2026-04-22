@@ -1,7 +1,7 @@
 // encrypted_extensions.dart
 import 'dart:typed_data';
 import '../buffer.dart';
-import 'tls_messages.dart';
+import 'tls_msg.dart';
 
 class EncryptedExtensions extends TlsHandshakeMessage {
   final List<TlsExtension> extensions;
