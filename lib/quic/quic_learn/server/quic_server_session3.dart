@@ -17,6 +17,7 @@ import '../../packet/quic_packet.dart';
 import '../../quic_ack.dart';
 import '../../utils.dart';
 import '../cert_utils.dart';
+import '../constants.dart';
 import '../fingerprint.dart';
 import '../h31.dart';
 import 'constants.dart';

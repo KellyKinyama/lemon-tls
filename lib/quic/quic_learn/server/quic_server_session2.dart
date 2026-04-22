@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
+import '../constants.dart';
 import '../fingerprint.dart';
 
 import '../../buffer.dart';

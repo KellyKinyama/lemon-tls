@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:hex/hex.dart';
+import '../constants.dart';
 import '../fingerprint.dart';
 
 import '../../buffer.dart';
@@ -24,7 +25,6 @@ import '../cert_utils.dart';
 import '../../handshake/tls_server_builder.dart';
 import 'constants.dart';
 
-
 Uint8List _padTo1200(Uint8List pkt) {
   const minInitialSize = 1200;
   if (pkt.length >= minInitialSize) return pkt;
@@ -32,7 +32,6 @@ Uint8List _padTo1200(Uint8List pkt) {
   out.setRange(0, pkt.length, pkt);
   return out;
 }
-
 
 enum EncryptionLevel { initial, handshake, application }
 
@@ -52,7 +51,6 @@ class QuicKeys {
 }""";
   }
 }
-
 
 class ServerHandshakeFlight {
   /// Full TLS handshake message bytes (type + 3-byte length + body)

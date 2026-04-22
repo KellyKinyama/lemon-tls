@@ -2,31 +2,16 @@ import 'dart:typed_data';
 import 'package:hex/hex.dart';
 import 'package:lemon_tls/quic/quic_learn/client/quic_session.dart';
 
-import '../buffer.dart';
-import '../quic_learn/client/quic_session2.dart';
-import '../quic_learn/constants.dart';
-import '../quic_learn/server/constants.dart';
-import 'client_hello.dart';
-import 'server_hello.dart';
-import 'encrypted_extensions.dart';
-import 'certificate.dart';
-import 'certificate_verify.dart';
-import 'finished.dart';
-
-abstract class TlsHandshakeMessage {
-  final int msgType;
-  String get typeName => handshakeTypeMap[msgType] ?? 'Unknown';
-  TlsHandshakeMessage(this.msgType);
-}
-
-class UnknownHandshakeMessage extends TlsHandshakeMessage {
-  final Uint8List body;
-  UnknownHandshakeMessage(int msgType, this.body) : super(msgType);
-
-  @override
-  String toString() =>
-      'ℹ️ Parsed UnknownHandshake(type: $msgType, len: ${body.length})';
-}
+import '../../buffer.dart';
+import '../../handshake/certificate.dart';
+import '../../handshake/certificate_verify.dart';
+import '../../handshake/client_hello.dart';
+import '../../handshake/encrypted_extensions.dart';
+import '../../handshake/finished.dart';
+import '../../handshake/server_hello.dart';
+import '../../handshake/tls_messages.dart';
+import '../constants.dart';
+import 'quic_session2.dart';
 
 class TlsExtension {
   final int type;

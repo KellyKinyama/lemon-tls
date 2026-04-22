@@ -1,10 +1,291 @@
+// // import 'dart:typed_data';
+
+// // import 'package:hex/hex.dart';
+// // import 'package:lemon_tls/quic/handshake/tls_messages.dart';
+
+// // import '../buffer.dart';
+// // import '../frames/quic_frames.dart';
+// // import 'quic_session.dart';
+
+// // /// =============================================================
+// // /// Parsed QUIC payload result
+// // /// =============================================================
+// // class ParsedQuicPayload {
+// //   final List<QuicFrame> frames;
+// //   List<CryptoFrame> cryptoFrames = [];
+// //   final AckFrame? ack;
+
+// //   List<TlsHandshakeMessage> tlsMessages;
+
+// //   ParsedQuicPayload({
+// //     required this.frames,
+// //     this.ack,
+// //     required this.cryptoFrames,
+// //     required this.tlsMessages,
+// //   });
+// // }
+
+// // /// =============================================================
+// // /// Parse decrypted QUIC payload into frames
+// // /// =============================================================
+
+// // ParsedQuicPayload parsePayload(
+// //   Uint8List plaintextPayload,
+// //   QuicSession session, {
+// //   required EncryptionLevel level,
+// // }) {
+// //   print('--- Parsing Decrypted QUIC Payload ---');
+
+// //   final buffer = QuicBuffer(data: plaintextPayload);
+// //   final frames = <QuicFrame>[];
+// //   final cryptoFrames = <CryptoFrame>[];
+// //   final tlsMessages = <TlsHandshakeMessage>[];
+// //   AckFrame? ackFrame;
+
+// //   try {
+// //     while (!buffer.eof && buffer.remaining > 0) {
+// //       // while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
+// //       final frameType = buffer.pullVarInt();
+
+// //       // =========================================================
+// //       // ✅ CRYPTO frame (0x06)
+// //       // =========================================================
+// //       if (frameType == 0x06) {
+// //         final offset = buffer.pullVarInt();
+// //         final length = buffer.pullVarInt();
+// //         final cryptoData = buffer.pullBytes(length);
+
+// //         print('✅ Parsed CRYPTO Frame: offset=$offset, length=$length');
+
+// //         // ✅ Store CRYPTO chunk
+// //         session.cryptoChunksByLevel[level]![offset] = cryptoData;
+
+// //         final assembled = session.assembleCryptoStream(level);
+
+// //         // Append newly contiguous received TLS bytes to transcript
+// //         if (assembled.isNotEmpty) {
+// //           session.tlsTranscript.add(assembled);
+// //           tlsMessages.addAll(parseTlsMessages(assembled, quicSession: session));
+
+// //           // ✅ Extract the exact server handshake messages from the client side
+// //           _maybeLogServerArtifacts(session);
+// //         }
+// //       }
+// //       // =========================================================
+// //       // ✅ ACK frame (0x02)
+// //       // =========================================================
+// //       else if (frameType == 0x02) {
+// //         final hasECN = (frameType & 0x01) == 0x01;
+
+// //         final largest = buffer.pullVarInt();
+// //         final delay = buffer.pullVarInt();
+// //         final rangeCount = buffer.pullVarInt();
+// //         final firstRange = buffer.pullVarInt();
+
+// //         final ranges = <dynamic>[];
+// //         for (int i = 0; i < rangeCount; i++) {
+// //           final gap = buffer.pullVarInt();
+// //           final len = buffer.pullVarInt();
+// //           ranges.add((gap: gap, length: len));
+// //         }
+
+// //         dynamic ecn;
+// //         if (hasECN) {
+// //           final ect0 = buffer.pullVarInt();
+// //           final ect1 = buffer.pullVarInt();
+// //           final ce = buffer.pullVarInt();
+// //           ecn = {ect0: ect0, ect1: ect1, ce: ce};
+// //         }
+
+// //         ackFrame = AckFrame(
+// //           largest: largest,
+// //           delay: delay,
+// //           firstRange: firstRange,
+// //           ranges: ranges,
+// //           ecn: ecn,
+// //         );
+
+// //         frames.add(ackFrame);
+// //       }
+// //       // =========================================================
+// //       // ✅ Skip unknown frames
+// //       // =========================================================
+// //       else if (frameType == 0x00) {
+// //         // PADDING: nothing else to read
+// //         continue;
+// //       } else {
+// //         print('ℹ️ Skipping frame type 0x${frameType.toRadixString(16)}');
+// //       }
+// //     }
+// //   } catch (e, st) {
+// //     print('\n🛑 Error during payload parsing: $e\n$st');
+// //   }
+
+// //   print('\n🎉 Payload parsing complete.');
+
+// //   return ParsedQuicPayload(
+// //     frames: frames,
+// //     cryptoFrames: cryptoFrames,
+// //     ack: ackFrame,
+// //     tlsMessages: tlsMessages,
+// //   );
+// // }
+
+// // String _handshakeTypeName(int type) {
+// //   switch (type) {
+// //     case 0x02:
+// //       return "ServerHello";
+// //     case 0x08:
+// //       return "EncryptedExtensions";
+// //     case 0x0b:
+// //       return "Certificate";
+// //     case 0x0f:
+// //       return "CertificateVerify";
+// //     case 0x14:
+// //       return "Finished";
+// //     default:
+// //       return "Unknown(0x${type.toRadixString(16)})";
+// //   }
+// // }
+
+// // /// Extracts complete TLS handshake messages from a byte stream.
+// // /// Returns a map keyed by handshake type.
+// // /// If multiple messages of the same type appear, the last one wins.
+// // /// (For your current use, that's fine.)
+// // Map<int, Uint8List> _extractHandshakeMessages(Uint8List stream) {
+// //   final out = <int, Uint8List>{};
+
+// //   int i = 0;
+// //   while (i + 4 <= stream.length) {
+// //     final type = stream[i];
+// //     final len = (stream[i + 1] << 16) | (stream[i + 2] << 8) | stream[i + 3];
+
+// //     // Stop if the current message is incomplete
+// //     if (i + 4 + len > stream.length) {
+// //       break;
+// //     }
+
+// //     out[type] = stream.sublist(i, i + 4 + len);
+// //     i += 4 + len;
+// //   }
+
+// //   return out;
+// // }
+
+// // /// Parses useful fields out of a full ServerHello handshake message.
+// // /// Expects the full TLS handshake message: type + 3-byte len + body.
+// // void _logServerHelloFields(Uint8List serverHello) {
+// //   if (serverHello.length < 4) return;
+
+// //   final body = serverHello.sublist(4);
+// //   int p = 0;
+
+// //   if (body.length < 2 + 32 + 1 + 2 + 1 + 2) {
+// //     return;
+// //   }
+
+// //   final legacyVersion = (body[p++] << 8) | body[p++];
+// //   final serverRandom = body.sublist(p, p + 32);
+// //   p += 32;
+
+// //   final sessionIdLen = body[p++];
+// //   final sessionId = body.sublist(p, p + sessionIdLen);
+// //   p += sessionIdLen;
+
+// //   final cipherSuite = (body[p++] << 8) | body[p++];
+// //   final compressionMethod = body[p++];
+
+// //   final extensionsLen = (body[p++] << 8) | body[p++];
+// //   final extEnd = p + extensionsLen;
+
+// //   int? selectedGroup;
+// //   Uint8List? serverPublicKey;
+
+// //   while (p + 4 <= body.length && p < extEnd) {
+// //     final extType = (body[p++] << 8) | body[p++];
+// //     final extLen = (body[p++] << 8) | body[p++];
+// //     final extData = body.sublist(p, p + extLen);
+// //     p += extLen;
+
+// //     if (extType == 0x0033 && extData.length >= 4) {
+// //       selectedGroup = (extData[0] << 8) | extData[1];
+// //       final keyLen = (extData[2] << 8) | extData[3];
+// //       if (4 + keyLen <= extData.length) {
+// //         serverPublicKey = extData.sublist(4, 4 + keyLen);
+// //       }
+// //     }
+// //   }
+
+// //   print("🟪 [CLIENT EXTRACT] ServerHello fields");
+// //   print("  legacy_version: $legacyVersion");
+// //   print("  server_random: ${HEX.encode(serverRandom)}");
+// //   print("  session_id: ${HEX.encode(sessionId)}");
+// //   print("  cipher_suite: $cipherSuite");
+// //   print("  compression_method: $compressionMethod");
+// //   print("  selected_group: ${selectedGroup ?? -1}");
+// //   if (serverPublicKey != null) {
+// //     print("  server_public_key: ${HEX.encode(serverPublicKey)}");
+// //   }
+// // }
+
+// // /// Logs the exact server-side handshake messages once they are all available.
+// // /// This is the easiest way to extract:
+// // ///   - serverHelloHex
+// // ///   - encryptedExtensionsHex
+// // ///   - certificateHex
+// // ///   - certificateVerifyHex
+// // ///   - finishedHex
+// // ///
+// // /// directly from the client side.
+// // void _maybeLogServerArtifacts(QuicSession session) {
+// //   // if (session.serverArtifactsLogged) {
+// //   //   return;
+// //   // }
+
+// //   final transcript = session.tlsTranscript.toBytes();
+// //   final msgs = _extractHandshakeMessages(transcript);
+
+// //   final serverHello = msgs[0x02];
+// //   final encryptedExtensions = msgs[0x08];
+// //   final certificate = msgs[0x0b];
+// //   final certificateVerify = msgs[0x0f];
+// //   final finished = msgs[0x14];
+
+// //   // Only log once we have the 4 server-flight messages you need for the Dart server.
+// //   if (serverHello == null ||
+// //       encryptedExtensions == null ||
+// //       certificate == null ||
+// //       certificateVerify == null) {
+// //     return;
+// //   }
+
+// //   print("🟪 [CLIENT EXTRACT] Full server handshake artifacts");
+// //   print('const String serverHelloHex = "${HEX.encode(serverHello)}";');
+// //   print(
+// //     'const String encryptedExtensionsHex = "${HEX.encode(encryptedExtensions)}";',
+// //   );
+// //   print('const String certificateHex = "${HEX.encode(certificate)}";');
+// //   print(
+// //     'const String certificateVerifyHex = "${HEX.encode(certificateVerify)}";',
+// //   );
+
+// //   if (finished != null) {
+// //     print('const String finishedHex = "${HEX.encode(finished)}";');
+// //   }
+
+// //   _logServerHelloFields(serverHello);
+
+// //   // session.serverArtifactsLogged = true;
+// //   print("✅ Extracted server handshake values from the client side");
+// // }
+
 // import 'dart:typed_data';
 
 // import 'package:hex/hex.dart';
 // import 'package:lemon_tls/quic/handshake/tls_messages.dart';
 
-// import '../buffer.dart';
-// import '../frames/quic_frames.dart';
+// import '../../buffer.dart';
+// import '../../frames/quic_frames.dart';
 // import 'quic_session.dart';
 
 // /// =============================================================
@@ -12,23 +293,25 @@
 // /// =============================================================
 // class ParsedQuicPayload {
 //   final List<QuicFrame> frames;
-//   List<CryptoFrame> cryptoFrames = [];
+//   final List<CryptoFrame> cryptoFrames;
 //   final AckFrame? ack;
-
-//   List<TlsHandshakeMessage> tlsMessages;
+//   final List<TlsHandshakeMessage> tlsMessages;
 
 //   ParsedQuicPayload({
 //     required this.frames,
-//     this.ack,
 //     required this.cryptoFrames,
+//     this.ack,
 //     required this.tlsMessages,
 //   });
 // }
 
 // /// =============================================================
-// /// Parse decrypted QUIC payload into frames
+// /// Hardened QUIC payload parser
+// ///  - Exhaustion-driven (never sentinel-based)
+// ///  - Correctly handles ACK (0x02) and ACK+ECN (0x03)
+// ///  - Safe against ACK-only / padding-only packets
+// ///  - Never reads past buffer end
 // /// =============================================================
-
 // ParsedQuicPayload parsePayload(
 //   Uint8List plaintextPayload,
 //   QuicSession session, {
@@ -43,56 +326,76 @@
 //   AckFrame? ackFrame;
 
 //   try {
-//     while (!buffer.eof && buffer.remaining > 0) {
-//       // while (!buffer.eof && buffer.byteData.getUint8(buffer.readOffset) != 0) {
+//     while (buffer.remaining > 0) {
+//       // ✅ Never attempt to read a frame type if no data remains
+//       if (buffer.remaining == 0) break;
+
 //       final frameType = buffer.pullVarInt();
+
+//       // =========================================================
+//       // ✅ PADDING (0x00) — single-byte, may repeat
+//       // =========================================================
+//       if (frameType == 0x00) {
+//         // Nothing else to read for padding
+//         continue;
+//       }
 
 //       // =========================================================
 //       // ✅ CRYPTO frame (0x06)
 //       // =========================================================
 //       if (frameType == 0x06) {
+//         if (buffer.remaining == 0) break;
 //         final offset = buffer.pullVarInt();
+//         if (buffer.remaining == 0) break;
 //         final length = buffer.pullVarInt();
+//         if (buffer.remaining < length) break;
+
 //         final cryptoData = buffer.pullBytes(length);
 
 //         print('✅ Parsed CRYPTO Frame: offset=$offset, length=$length');
 
-//         // ✅ Store CRYPTO chunk
 //         session.cryptoChunksByLevel[level]![offset] = cryptoData;
 
 //         final assembled = session.assembleCryptoStream(level);
-
-//         // Append newly contiguous received TLS bytes to transcript
 //         if (assembled.isNotEmpty) {
 //           session.tlsTranscript.add(assembled);
 //           tlsMessages.addAll(parseTlsMessages(assembled, quicSession: session));
-
-//           // ✅ Extract the exact server handshake messages from the client side
 //           _maybeLogServerArtifacts(session);
 //         }
+//         continue;
 //       }
+
 //       // =========================================================
-//       // ✅ ACK frame (0x02)
+//       // ✅ ACK (0x02) / ACK + ECN (0x03)
 //       // =========================================================
-//       else if (frameType == 0x02) {
+//       if (frameType == 0x02 || frameType == 0x03) {
 //         final hasECN = (frameType & 0x01) == 0x01;
 
+//         if (buffer.remaining == 0) break;
 //         final largest = buffer.pullVarInt();
+//         if (buffer.remaining == 0) break;
 //         final delay = buffer.pullVarInt();
+//         if (buffer.remaining == 0) break;
 //         final rangeCount = buffer.pullVarInt();
+//         if (buffer.remaining == 0) break;
 //         final firstRange = buffer.pullVarInt();
 
 //         final ranges = <dynamic>[];
 //         for (int i = 0; i < rangeCount; i++) {
+//           if (buffer.remaining == 0) break;
 //           final gap = buffer.pullVarInt();
+//           if (buffer.remaining == 0) break;
 //           final len = buffer.pullVarInt();
 //           ranges.add((gap: gap, length: len));
 //         }
 
 //         dynamic ecn;
 //         if (hasECN) {
+//           if (buffer.remaining == 0) break;
 //           final ect0 = buffer.pullVarInt();
+//           if (buffer.remaining == 0) break;
 //           final ect1 = buffer.pullVarInt();
+//           if (buffer.remaining == 0) break;
 //           final ce = buffer.pullVarInt();
 //           ecn = {ect0: ect0, ect1: ect1, ce: ce};
 //         }
@@ -106,18 +409,17 @@
 //         );
 
 //         frames.add(ackFrame);
-//       }
-//       // =========================================================
-//       // ✅ Skip unknown frames
-//       // =========================================================
-//       else if (frameType == 0x00) {
-//         // PADDING: nothing else to read
 //         continue;
-//       } else {
-//         print('ℹ️ Skipping frame type 0x${frameType.toRadixString(16)}');
 //       }
+
+//       // =========================================================
+//       // ✅ Unknown frame — stop safely
+//       // =========================================================
+//       print('ℹ️ Skipping unknown frame type 0x${frameType.toRadixString(16)}');
+//       break;
 //     }
 //   } catch (e, st) {
+//     // ✅ Parsing errors MUST NOT crash the connection
 //     print('\n🛑 Error during payload parsing: $e\n$st');
 //   }
 
@@ -130,6 +432,10 @@
 //     tlsMessages: tlsMessages,
 //   );
 // }
+
+// // -----------------------------------------------------------------
+// // The helpers below are unchanged from your original implementation
+// // -----------------------------------------------------------------
 
 // String _handshakeTypeName(int type) {
 //   switch (type) {
@@ -148,53 +454,33 @@
 //   }
 // }
 
-// /// Extracts complete TLS handshake messages from a byte stream.
-// /// Returns a map keyed by handshake type.
-// /// If multiple messages of the same type appear, the last one wins.
-// /// (For your current use, that's fine.)
 // Map<int, Uint8List> _extractHandshakeMessages(Uint8List stream) {
 //   final out = <int, Uint8List>{};
-
 //   int i = 0;
 //   while (i + 4 <= stream.length) {
 //     final type = stream[i];
 //     final len = (stream[i + 1] << 16) | (stream[i + 2] << 8) | stream[i + 3];
-
-//     // Stop if the current message is incomplete
-//     if (i + 4 + len > stream.length) {
-//       break;
-//     }
-
+//     if (i + 4 + len > stream.length) break;
 //     out[type] = stream.sublist(i, i + 4 + len);
 //     i += 4 + len;
 //   }
-
 //   return out;
 // }
 
-// /// Parses useful fields out of a full ServerHello handshake message.
-// /// Expects the full TLS handshake message: type + 3-byte len + body.
 // void _logServerHelloFields(Uint8List serverHello) {
 //   if (serverHello.length < 4) return;
-
 //   final body = serverHello.sublist(4);
 //   int p = 0;
-
-//   if (body.length < 2 + 32 + 1 + 2 + 1 + 2) {
-//     return;
-//   }
+//   if (body.length < 2 + 32 + 1 + 2 + 1 + 2) return;
 
 //   final legacyVersion = (body[p++] << 8) | body[p++];
 //   final serverRandom = body.sublist(p, p + 32);
 //   p += 32;
-
 //   final sessionIdLen = body[p++];
 //   final sessionId = body.sublist(p, p + sessionIdLen);
 //   p += sessionIdLen;
-
 //   final cipherSuite = (body[p++] << 8) | body[p++];
 //   final compressionMethod = body[p++];
-
 //   final extensionsLen = (body[p++] << 8) | body[p++];
 //   final extEnd = p + extensionsLen;
 
@@ -228,20 +514,7 @@
 //   }
 // }
 
-// /// Logs the exact server-side handshake messages once they are all available.
-// /// This is the easiest way to extract:
-// ///   - serverHelloHex
-// ///   - encryptedExtensionsHex
-// ///   - certificateHex
-// ///   - certificateVerifyHex
-// ///   - finishedHex
-// ///
-// /// directly from the client side.
 // void _maybeLogServerArtifacts(QuicSession session) {
-//   // if (session.serverArtifactsLogged) {
-//   //   return;
-//   // }
-
 //   final transcript = session.tlsTranscript.toBytes();
 //   final msgs = _extractHandshakeMessages(transcript);
 
@@ -251,7 +524,6 @@
 //   final certificateVerify = msgs[0x0f];
 //   final finished = msgs[0x14];
 
-//   // Only log once we have the 4 server-flight messages you need for the Dart server.
 //   if (serverHello == null ||
 //       encryptedExtensions == null ||
 //       certificate == null ||
@@ -268,17 +540,14 @@
 //   print(
 //     'const String certificateVerifyHex = "${HEX.encode(certificateVerify)}";',
 //   );
-
 //   if (finished != null) {
 //     print('const String finishedHex = "${HEX.encode(finished)}";');
 //   }
 
 //   _logServerHelloFields(serverHello);
-
-//   // session.serverArtifactsLogged = true;
 //   print("✅ Extracted server handshake values from the client side");
 // }
-
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:hex/hex.dart';
@@ -286,7 +555,8 @@ import 'package:lemon_tls/quic/handshake/tls_messages.dart';
 
 import '../../buffer.dart';
 import '../../frames/quic_frames.dart';
-import 'quic_session.dart';
+import '../constants.dart';
+import 'quic_session2.dart';
 
 /// =============================================================
 /// Parsed QUIC payload result
@@ -303,14 +573,25 @@ class ParsedQuicPayload {
     this.ack,
     required this.tlsMessages,
   });
+
+  @override
+  String toString() {
+    return 'ParsedQuicPayload('
+        'frames=${frames.length}, '
+        'cryptoFrames=${cryptoFrames.length}, '
+        'tlsMessages=${tlsMessages.length}, '
+        'ack=${ack != null}'
+        ')';
+  }
 }
 
 /// =============================================================
 /// Hardened QUIC payload parser
 ///  - Exhaustion-driven (never sentinel-based)
-///  - Correctly handles ACK (0x02) and ACK+ECN (0x03)
-///  - Safe against ACK-only / padding-only packets
-///  - Never reads past buffer end
+///  - Correct ACK (0x02) and ACK+ECN (0x03) handling
+///  - Adds STREAM support for HTTP/3 / WebTransport
+///  - Adds DATAGRAM support for WebTransport datagrams
+///  - Safe against truncated frames / buffer overrun
 /// =============================================================
 ParsedQuicPayload parsePayload(
   Uint8List plaintextPayload,
@@ -327,56 +608,81 @@ ParsedQuicPayload parsePayload(
 
   try {
     while (buffer.remaining > 0) {
-      // ✅ Never attempt to read a frame type if no data remains
       if (buffer.remaining == 0) break;
 
       final frameType = buffer.pullVarInt();
 
       // =========================================================
-      // ✅ PADDING (0x00) — single-byte, may repeat
+      // PADDING (0x00)
       // =========================================================
       if (frameType == 0x00) {
-        // Nothing else to read for padding
         continue;
       }
 
       // =========================================================
-      // ✅ CRYPTO frame (0x06)
+      // PING (0x01)
+      // =========================================================
+      if (frameType == 0x01) {
+        print('✅ Parsed PING');
+        continue;
+      }
+
+      // =========================================================
+      // CRYPTO (0x06)
       // =========================================================
       if (frameType == 0x06) {
         if (buffer.remaining == 0) break;
         final offset = buffer.pullVarInt();
+
         if (buffer.remaining == 0) break;
         final length = buffer.pullVarInt();
-        if (buffer.remaining < length) break;
+
+        if (buffer.remaining < length) {
+          print(
+            '🛑 CRYPTO frame truncated: need $length, have ${buffer.remaining}',
+          );
+          break;
+        }
 
         final cryptoData = buffer.pullBytes(length);
 
         print('✅ Parsed CRYPTO Frame: offset=$offset, length=$length');
 
-        session.cryptoChunksByLevel[level]![offset] = cryptoData;
+        // Store CRYPTO chunk in per-level reassembly map
+        if (session.cryptoChunksByLevel.containsKey(level)) {
+          session.cryptoChunksByLevel[level]![offset] = cryptoData;
+        }
 
+        // Reassemble contiguous CRYPTO stream bytes
         final assembled = session.assembleCryptoStream(level);
+
+        // Append newly contiguous bytes to transcript and parse TLS messages
         if (assembled.isNotEmpty) {
           session.tlsTranscript.add(assembled);
           tlsMessages.addAll(parseTlsMessages(assembled, quicSession: session));
+
+          // Log useful server-side handshake artifacts from client side
           _maybeLogServerArtifacts(session);
         }
+
         continue;
       }
 
       // =========================================================
-      // ✅ ACK (0x02) / ACK + ECN (0x03)
+      // ACK (0x02) / ACK + ECN (0x03)
       // =========================================================
       if (frameType == 0x02 || frameType == 0x03) {
         final hasECN = (frameType & 0x01) == 0x01;
 
         if (buffer.remaining == 0) break;
         final largest = buffer.pullVarInt();
+
         if (buffer.remaining == 0) break;
         final delay = buffer.pullVarInt();
+
         if (buffer.remaining == 0) break;
         final rangeCount = buffer.pullVarInt();
+
         if (buffer.remaining == 0) break;
         final firstRange = buffer.pullVarInt();
 
@@ -384,8 +690,10 @@ ParsedQuicPayload parsePayload(
         for (int i = 0; i < rangeCount; i++) {
           if (buffer.remaining == 0) break;
           final gap = buffer.pullVarInt();
+
           if (buffer.remaining == 0) break;
           final len = buffer.pullVarInt();
+
           ranges.add((gap: gap, length: len));
         }
 
@@ -393,10 +701,13 @@ ParsedQuicPayload parsePayload(
         if (hasECN) {
           if (buffer.remaining == 0) break;
           final ect0 = buffer.pullVarInt();
+
           if (buffer.remaining == 0) break;
           final ect1 = buffer.pullVarInt();
+
           if (buffer.remaining == 0) break;
           final ce = buffer.pullVarInt();
+
           ecn = {ect0: ect0, ect1: ect1, ce: ce};
         }
 
@@ -409,17 +720,139 @@ ParsedQuicPayload parsePayload(
         );
 
         frames.add(ackFrame);
+
+        print(
+          '✅ Parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
+        );
+
         continue;
       }
 
       // =========================================================
-      // ✅ Unknown frame — stop safely
+      // STREAM frames (0x08..0x0f)
+      // =========================================================
+      if ((frameType & 0xF8) == 0x08) {
+        final fin = (frameType & 0x01) != 0;
+        final hasLen = (frameType & 0x02) != 0;
+        final hasOff = (frameType & 0x04) != 0;
+
+        if (buffer.remaining == 0) break;
+        final streamId = buffer.pullVarInt();
+
+        final streamOffset = hasOff ? buffer.pullVarInt() : 0;
+        final dataLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
+
+        if (buffer.remaining < dataLen) {
+          print(
+            '🛑 STREAM frame truncated: need $dataLen, have ${buffer.remaining}',
+          );
+          break;
+        }
+
+        final data = buffer.pullBytes(dataLen);
+
+        print(
+          '✅ Parsed STREAM frame '
+          'streamId=$streamId offset=$streamOffset len=$dataLen fin=$fin',
+        );
+
+        // Route 1-RTT/application STREAM frames into HTTP/3/WebTransport
+        if (level == EncryptionLevel.application) {
+          session.handleHttp3StreamChunk(
+            streamId,
+            streamOffset,
+            data,
+            fin: fin,
+          );
+        } else {
+          print('ℹ️ Ignoring non-application STREAM frame on level=$level');
+        }
+
+        continue;
+      }
+
+      // =========================================================
+      // DATAGRAM frames (0x30 no length, 0x31 with length)
+      // =========================================================
+      if (frameType == 0x30 || frameType == 0x31) {
+        final hasLen = frameType == 0x31;
+        final datagramLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
+
+        if (buffer.remaining < datagramLen) {
+          print(
+            '🛑 DATAGRAM frame truncated: need $datagramLen, have ${buffer.remaining}',
+          );
+          break;
+        }
+
+        final payload = buffer.pullBytes(datagramLen);
+
+        print('✅ Parsed DATAGRAM len=${payload.length}');
+
+        if (level == EncryptionLevel.application) {
+          session.handleWebTransportDatagram(payload);
+        } else {
+          print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
+        }
+
+        continue;
+      }
+
+      // =========================================================
+      // HANDSHAKE_DONE (0x1e)
+      // =========================================================
+      if (frameType == 0x1e) {
+        print('✅ Parsed HANDSHAKE_DONE');
+        continue;
+      }
+
+      // =========================================================
+      // CONNECTION_CLOSE transport/application (0x1c / 0x1d)
+      // =========================================================
+      if (frameType == 0x1c || frameType == 0x1d) {
+        if (buffer.remaining == 0) break;
+        final errorCode = buffer.pullVarInt();
+
+        int? offendingFrameType;
+        if (frameType == 0x1c) {
+          if (buffer.remaining == 0) break;
+          offendingFrameType = buffer.pullVarInt();
+        }
+
+        if (buffer.remaining == 0) break;
+        final reasonLen = buffer.pullVarInt();
+
+        if (buffer.remaining < reasonLen) {
+          print(
+            '🛑 CONNECTION_CLOSE reason truncated: need $reasonLen, have ${buffer.remaining}',
+          );
+          break;
+        }
+
+        final reasonBytes = reasonLen > 0
+            ? buffer.pullBytes(reasonLen)
+            : Uint8List(0);
+
+        final reason = utf8.decode(reasonBytes, allowMalformed: true);
+
+        print(
+          '🛑 Parsed CONNECTION_CLOSE '
+          'frameType=0x${frameType.toRadixString(16)} '
+          'errorCode=0x${errorCode.toRadixString(16)} '
+          '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
+          'reason="$reason"',
+        );
+
+        break;
+      }
+
+      // =========================================================
+      // Unknown frame — stop safely
       // =========================================================
       print('ℹ️ Skipping unknown frame type 0x${frameType.toRadixString(16)}');
       break;
     }
   } catch (e, st) {
-    // ✅ Parsing errors MUST NOT crash the connection
     print('\n🛑 Error during payload parsing: $e\n$st');
   }
 
@@ -434,7 +867,7 @@ ParsedQuicPayload parsePayload(
 }
 
 // -----------------------------------------------------------------
-// The helpers below are unchanged from your original implementation
+// Helpers retained from your original implementation
 // -----------------------------------------------------------------
 
 String _handshakeTypeName(int type) {
@@ -456,31 +889,40 @@ String _handshakeTypeName(int type) {
 
 Map<int, Uint8List> _extractHandshakeMessages(Uint8List stream) {
   final out = <int, Uint8List>{};
+
   int i = 0;
   while (i + 4 <= stream.length) {
     final type = stream[i];
     final len = (stream[i + 1] << 16) | (stream[i + 2] << 8) | stream[i + 3];
+
     if (i + 4 + len > stream.length) break;
+
     out[type] = stream.sublist(i, i + 4 + len);
     i += 4 + len;
   }
+
   return out;
 }
 
 void _logServerHelloFields(Uint8List serverHello) {
   if (serverHello.length < 4) return;
+
   final body = serverHello.sublist(4);
   int p = 0;
+
   if (body.length < 2 + 32 + 1 + 2 + 1 + 2) return;
 
   final legacyVersion = (body[p++] << 8) | body[p++];
   final serverRandom = body.sublist(p, p + 32);
   p += 32;
+
   final sessionIdLen = body[p++];
   final sessionId = body.sublist(p, p + sessionIdLen);
   p += sessionIdLen;
+
   final cipherSuite = (body[p++] << 8) | body[p++];
   final compressionMethod = body[p++];
+
   final extensionsLen = (body[p++] << 8) | body[p++];
   final extEnd = p + extensionsLen;
 
@@ -540,6 +982,7 @@ void _maybeLogServerArtifacts(QuicSession session) {
   print(
     'const String certificateVerifyHex = "${HEX.encode(certificateVerify)}";',
   );
+
   if (finished != null) {
     print('const String finishedHex = "${HEX.encode(finished)}";');
   }
