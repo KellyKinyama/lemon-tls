@@ -145,11 +145,13 @@ class QuicSession {
   final Map<EncryptionLevel, Map<int, Uint8List>> cryptoChunksByLevel = {
     EncryptionLevel.initial: <int, Uint8List>{},
     EncryptionLevel.handshake: <int, Uint8List>{},
+    EncryptionLevel.application: <int, Uint8List>{},
   };
 
   final Map<EncryptionLevel, int> cryptoReadOffsetByLevel = {
     EncryptionLevel.initial: 0,
     EncryptionLevel.handshake: 0,
+    EncryptionLevel.application: 0,
   };
 
   final Map<EncryptionLevel, AckState> ackStates = {
@@ -466,9 +468,15 @@ class QuicSession {
   // ===========================================================================
 
   Uint8List assembleCryptoStream(EncryptionLevel level) {
-    final chunks = cryptoChunksByLevel[level]!;
-    int readOffset = cryptoReadOffsetByLevel[level]!;
+    final chunks = cryptoChunksByLevel[level];
+    final readOffset0 = cryptoReadOffsetByLevel[level];
 
+    if (chunks == null || readOffset0 == null) {
+      throw StateError('ℹ️ No CRYPTO stream reassembly state for $level');
+      return Uint8List(0);
+    }
+
+    int readOffset = readOffset0;
     final result = <int>[];
 
     while (chunks.containsKey(readOffset)) {
@@ -480,6 +488,28 @@ class QuicSession {
     cryptoReadOffsetByLevel[level] = readOffset;
     return Uint8List.fromList(result);
   }
+
+  // Uint8List assembleCryptoStream(EncryptionLevel level) {
+  //   final chunks = cryptoChunksByLevel[level];
+  //   final readOffset0 = cryptoReadOffsetByLevel[level];
+
+  //   if (chunks == null || readOffset0 == null) {
+  //     throw StateError('ℹ️ No CRYPTO stream reassembly state for $level');
+  //     return Uint8List(0);
+  //   }
+
+  //   int readOffset = readOffset0;
+  //   final result = <int>[];
+
+  //   while (chunks.containsKey(readOffset)) {
+  //     final chunk = chunks.remove(readOffset)!;
+  //     result.addAll(chunk);
+  //     readOffset += chunk.length;
+  //   }
+
+  //   cryptoReadOffsetByLevel[level] = readOffset;
+  //   return Uint8List.fromList(result);
+  // }
 
   // ===========================================================================
   // Handshake transcript helpers
@@ -937,19 +967,69 @@ class QuicSession {
   // Packet handling
   // ===========================================================================
 
+  // void handleQuicPacket(Uint8List pkt) {
+  //   // Learn the server CID from long-header packets before decrypting.
+  //   _maybeLearnPeerCid(pkt);
+
+  //   final packetLevel = encryptionLevel;
+  //   final previousLevel = encryptionLevel;
+
+  //   print("Encryption level: $encryptionLevel");
+
+  //   final result = decryptPacket(pkt, packetLevel);
+  //   onDecryptedPacket(result, packetLevel, InternetAddress("127.0.0.1"), 4433);
+
+  //   final parsed = parsePayload(result.plaintext!, this, level: packetLevel);
+
+  //   if (parsed.cryptoFrames.isNotEmpty) {
+  //     receivedCryptoFrames.addAll(parsed.cryptoFrames);
+  //   }
+
+  //   if (parsed.tlsMessages.isNotEmpty) {
+  //     receivedTlsMessages.addAll(parsed.tlsMessages);
+  //   }
+
+  //   if (encryptionLevel != previousLevel &&
+  //       encryptionLevel == EncryptionLevel.handshake) {
+  //     handshakeKeyDerivationTest();
+  //   }
+
+  //   final bool gotServerFinished = tlsTranscriptContainsFinished();
+
+  //   if (gotServerFinished && !serverFinishedReceived) {
+  //     serverFinishedReceived = true;
+  //     print("🧠 Server Finished processed");
+  //   }
+
+  //   if (serverFinishedReceived && !applicationSecretsDerived) {
+  //     deriveApplicationSecrets();
+  //     applicationSecretsDerived = true;
+  //     print("🔐 Application secrets derived");
+  //   }
+
+  //   if (serverFinishedReceived && !clientFinishedSent) {
+  //     sendClientFinished(address: InternetAddress("127.0.0.1"), port: 4433);
+  //     clientFinishedSent = true;
+  //     print("📤 Client Finished sent");
+  //   }
+
+  //   print("parsed: $parsed");
+  // }
+
   void handleQuicPacket(Uint8List pkt) {
     // Learn the server CID from long-header packets before decrypting.
     _maybeLearnPeerCid(pkt);
 
-    final packetLevel = encryptionLevel;
-    final previousLevel = encryptionLevel;
+    final actualLevel = detectPacketLevel(pkt);
+    final previousConnectionLevel = encryptionLevel;
 
-    print("Encryption level: $encryptionLevel");
+    print("Packet level: $actualLevel (connection state=$encryptionLevel)");
 
-    final result = decryptPacket(pkt, packetLevel);
-    onDecryptedPacket(result, packetLevel, InternetAddress("127.0.0.1"), 4433);
+    final result = decryptPacket(pkt, actualLevel);
 
-    final parsed = parsePayload(result.plaintext!, this, level: packetLevel);
+    onDecryptedPacket(result, actualLevel, InternetAddress("127.0.0.1"), 4433);
+
+    final parsed = parsePayload(result.plaintext!, this, level: actualLevel);
 
     if (parsed.cryptoFrames.isNotEmpty) {
       receivedCryptoFrames.addAll(parsed.cryptoFrames);
@@ -959,7 +1039,12 @@ class QuicSession {
       receivedTlsMessages.addAll(parsed.tlsMessages);
     }
 
-    if (encryptionLevel != previousLevel &&
+    // Only promote the connection state upward, never downward.
+    if (actualLevel.index > encryptionLevel.index) {
+      encryptionLevel = actualLevel;
+    }
+
+    if (encryptionLevel != previousConnectionLevel &&
         encryptionLevel == EncryptionLevel.handshake) {
       handshakeKeyDerivationTest();
     }
@@ -1123,6 +1208,24 @@ class QuicSession {
     if (fin) {
       print('✅ QUIC stream $streamId FIN received');
     }
+  }
+
+  EncryptionLevel detectPacketLevel(Uint8List packet) {
+    final firstByte = packet[0];
+
+    if ((firstByte & 0x80) != 0) {
+      final longType = parseLongHeaderType(packet);
+
+      if (longType == LongPacketType.initial) {
+        return EncryptionLevel.initial;
+      } else if (longType == LongPacketType.handshake) {
+        return EncryptionLevel.handshake;
+      } else {
+        throw StateError('Unsupported long-header packet type: $longType');
+      }
+    }
+
+    return EncryptionLevel.application;
   }
 
   // void _handleHttp3ControlFrame(int frameType, Uint8List payload) {
