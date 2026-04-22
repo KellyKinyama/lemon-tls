@@ -22,8 +22,35 @@ import 'package:x25519/x25519.dart' as ecdhe;
 
 import '../cert_utils.dart';
 import '../../handshake/tls_server_builder.dart';
+// import '../h3.dart';
+import '../h31.dart';
 import 'constants.dart';
 
+class KeyPair {
+  final Uint8List _privateKey;
+
+  KeyPair._(this._privateKey);
+
+  /// Raw 32-byte X25519 public key.
+  /// Raw 32-byte X25519 public key.
+  Uint8List get publicKeyBytes {
+    // Public key = X25519(privateKey, basePoint)
+    final pub = ecdhe.X25519(_privateKey, ecdhe.basePoint);
+    return Uint8List.fromList(pub);
+  }
+
+  /// Raw 32-byte X25519 private key.
+  Uint8List get privateKeyBytes => Uint8List.fromList(_privateKey);
+
+  static KeyPair generate() {
+    final seed = Uint8List(32);
+    final rnd = math.Random.secure();
+    for (var i = 0; i < seed.length; i++) {
+      seed[i] = rnd.nextInt(256);
+    }
+    return KeyPair._(seed);
+  }
+}
 
 Uint8List _padTo1200(Uint8List pkt) {
   const minInitialSize = 1200;
@@ -33,26 +60,99 @@ Uint8List _padTo1200(Uint8List pkt) {
   return out;
 }
 
+List<Uint8List> splitCoalescedPackets(Uint8List buf) {
+  final out = <Uint8List>[];
+  int i = 0;
 
-enum EncryptionLevel { initial, handshake, application }
+  while (i < buf.length) {
+    // Need at least 5 bytes for long header
+    if (i + 5 > buf.length) break;
 
-class QuicKeys {
-  final Uint8List key;
-  final Uint8List iv;
-  final Uint8List hp;
+    final flags = buf[i];
+    final isLong = (flags & 0x80) != 0;
 
-  const QuicKeys({required this.key, required this.iv, required this.hp});
+    if (isLong) {
+      int p = i + 1;
 
-  @override
-  String toString() {
-    return """QuicKeys{
-  key: ${HEX.encode(key)};
-  iv:  ${HEX.encode(iv)};
-  hp:  ${HEX.encode(hp)};
-}""";
+      // ---- Version (4 bytes) ----
+      if (p + 4 > buf.length) break;
+      p += 4;
+
+      // ---- DCID ----
+      if (p >= buf.length) break;
+      final dcidLen = buf[p++];
+      if (p + dcidLen > buf.length) break;
+      p += dcidLen;
+
+      // ---- SCID ----
+      if (p >= buf.length) break;
+      final scidLen = buf[p++];
+      if (p + scidLen > buf.length) break;
+      p += scidLen;
+
+      // ---- Token Length (ONLY Initial packets) ----
+      final packetType = (flags >> 4) & 0x03;
+
+      if (packetType == 0x00) {
+        // Initial packet → token field present
+        final token = readVarInt(buf, p);
+        if (token == null) break;
+
+        p += token.byteLength;
+
+        if (p + token.value > buf.length) break;
+        p += token.value;
+      }
+
+      // ---- Length field (varint) ----
+      final lengthField = readVarInt(buf, p);
+      if (lengthField == null) break;
+
+      final payloadLen = lengthField.value;
+      p += lengthField.byteLength;
+
+      // ---- Bounds check to avoid RangeError ----
+      final pktEnd = p + payloadLen;
+      if (pktEnd > buf.length) {
+        throw RangeError(
+          "QUIC long header claims payload length $payloadLen but only "
+          "${buf.length - p} bytes remain",
+        );
+      }
+
+      // ---- Extract packet ----
+      out.add(buf.sublist(i, pktEnd));
+
+      // Move to next packet
+      i = pktEnd;
+      continue;
+    }
+
+    // ------------------------------
+    // Short header → runs to end of UDP datagram
+    // ------------------------------
+    out.add(buf.sublist(i));
+    break;
+  }
+
+  return out;
+}
+
+// enum EncryptionLevel { initial, handshake, application }
+
+class PacketNumberSpace {
+  int largestPn = -1;
+
+  void onPacketDecrypted(int pn) {
+    if (pn > largestPn) {
+      largestPn = pn;
+    }
   }
 }
 
+class AckState {
+  final Set<int> received = <int>{};
+}
 
 class ServerHandshakeFlight {
   /// Full TLS handshake message bytes (type + 3-byte length + body)
@@ -656,6 +756,465 @@ class QuicServerSession {
   ///  - Prevents ACK-of-ACK loops
   /// =============================================================
 
+  // bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
+  //   print('--- Parsing Decrypted QUIC Payload (server) ---');
+
+  //   final buffer = QuicBuffer(data: plaintext);
+  //   bool ackEliciting = false;
+
+  //   try {
+  //     while (buffer.remaining > 0) {
+  //       final frameType = buffer.pullVarInt();
+
+  //       // =========================================================
+  //       // PADDING (0x00) — single byte, not ack-eliciting
+  //       // =========================================================
+  //       if (frameType == 0x00) {
+  //         continue;
+  //       }
+
+  //       // =========================================================
+  //       // PING (0x01) — ack-eliciting
+  //       // =========================================================
+  //       if (frameType == 0x01) {
+  //         print('✅ Server parsed PING');
+  //         ackEliciting = true;
+  //         continue;
+  //       }
+
+  //       // =========================================================
+  //       // CRYPTO (0x06) — ack-eliciting
+  //       // =========================================================
+  //       if (frameType == 0x06) {
+  //         if (buffer.remaining == 0) break;
+  //         final offset = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final length = buffer.pullVarInt();
+
+  //         if (buffer.remaining < length) {
+  //           print(
+  //             '🛑 Server CRYPTO frame truncated: need $length, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final data = buffer.pullBytes(length);
+
+  //         print('✅ Server parsed CRYPTO frame offset=$offset len=$length');
+  //         ackEliciting = true;
+
+  //         cryptoChunksByLevel[level]![offset] = data;
+  //         final assembled = assembleCryptoStream(level);
+
+  //         if (assembled.isNotEmpty) {
+  //           receivedHandshakeByLevel[level]!.add(assembled);
+
+  //           if (level == EncryptionLevel.initial) {
+  //             _maybeHandleClientHello();
+  //           } else if (level == EncryptionLevel.handshake) {
+  //             _maybeHandleClientFinished();
+  //           }
+  //         }
+  //         continue;
+  //       }
+
+  //       // =========================================================
+  //       // ACK (0x02) / ACK + ECN (0x03) — NOT ack-eliciting
+  //       // =========================================================
+  //       if (frameType == 0x02 || frameType == 0x03) {
+  //         final hasEcn = (frameType & 0x01) == 0x01;
+
+  //         if (buffer.remaining == 0) break;
+  //         final largest = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final delay = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final rangeCount = buffer.pullVarInt();
+
+  //         if (buffer.remaining == 0) break;
+  //         final firstRange = buffer.pullVarInt();
+
+  //         for (int i = 0; i < rangeCount; i++) {
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt(); // gap
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt(); // len
+  //         }
+
+  //         if (hasEcn) {
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt(); // ect0
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt(); // ect1
+
+  //           if (buffer.remaining == 0) break;
+  //           buffer.pullVarInt(); // ce
+  //         }
+
+  //         print(
+  //           '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
+  //         );
+  //         continue;
+  //       }
+
+  //       // =========================================================
+  //       // CONNECTION_CLOSE (transport: 0x1c, application: 0x1d)
+  //       // =========================================================
+  //       if (frameType == 0x1c || frameType == 0x1d) {
+  //         if (buffer.remaining == 0) break;
+  //         final errorCode = buffer.pullVarInt();
+
+  //         int? offendingFrameType;
+  //         if (frameType == 0x1c) {
+  //           if (buffer.remaining == 0) break;
+  //           offendingFrameType = buffer.pullVarInt();
+  //         }
+
+  //         if (buffer.remaining == 0) break;
+  //         final reasonLen = buffer.pullVarInt();
+
+  //         if (buffer.remaining < reasonLen) {
+  //           print(
+  //             '🛑 Server CONNECTION_CLOSE reason truncated: need $reasonLen, have ${buffer.remaining}',
+  //           );
+  //           break;
+  //         }
+
+  //         final reasonBytes = reasonLen > 0
+  //             ? buffer.pullBytes(reasonLen)
+  //             : Uint8List(0);
+
+  //         final reason = utf8.decode(reasonBytes, allowMalformed: true);
+
+  //         print(
+  //           '🛑 Server parsed CONNECTION_CLOSE '
+  //           'frameType=0x${frameType.toRadixString(16)} '
+  //           'errorCode=0x${errorCode.toRadixString(16)} '
+  //           '${offendingFrameType != null ? 'offendingFrameType=0x${offendingFrameType.toRadixString(16)} ' : ''}'
+  //           'reason="$reason"',
+  //         );
+  //         break;
+  //       }
+
+  //       // =========================================================
+  //       // Unknown / unsupported frame — stop safely
+  //       // =========================================================
+  //       print(
+  //         'ℹ️ Server stopping on unsupported frame type 0x${frameType.toRadixString(16)}',
+  //       );
+  //       break;
+  //     }
+  //   } catch (e, st) {
+  //     print('🛑 Server payload parse error: $e\n$st');
+  //   }
+
+  //   print('🎉 Server payload parsing complete.');
+  //   return ackEliciting;
+  // }
+
+  // ============================================================
+  // HTTP/3 + WebTransport state
+  // ============================================================
+
+  final Http3State h3 = Http3State();
+
+  // QUIC stream ID allocation (server side)
+  int nextServerBidiStreamId = 1; // server-initiated bidirectional
+  int nextServerUniStreamId = 3; // server-initiated unidirectional
+
+  void sendHttp3ControlStream() {
+    if (h3.controlStreamSent) return;
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send HTTP/3 control stream before 1-RTT keys');
+    }
+
+    final settingsPayload = build_settings_frame({
+      'SETTINGS_QPACK_MAX_TABLE_CAPACITY': 0,
+      'SETTINGS_QPACK_BLOCKED_STREAMS': 0,
+      'SETTINGS_ENABLE_CONNECT_PROTOCOL': 1,
+      'SETTINGS_ENABLE_WEBTRANSPORT': 1,
+      'SETTINGS_H3_DATAGRAM': 1,
+    });
+
+    final controlStreamBytes = Uint8List.fromList([
+      ...writeVarInt(H3_STREAM_TYPE_CONTROL),
+      ...writeVarInt(H3_FRAME_SETTINGS),
+      ...writeVarInt(settingsPayload.length),
+      ...settingsPayload,
+    ]);
+
+    sendApplicationUnidirectionalStream(controlStreamBytes, fin: false);
+
+    h3.controlStreamSent = true;
+    print('✅ HTTP/3 control stream sent');
+  }
+
+  void handleHttp3StreamChunk(
+    int streamId,
+    int streamOffset,
+    Uint8List streamData, {
+    required bool fin,
+  }) {
+    final chunks = h3.streamChunks.putIfAbsent(
+      streamId,
+      () => <int, Uint8List>{},
+    );
+    final readOffset = h3.streamReadOffsets[streamId] ?? 0;
+
+    // IMPORTANT: store by QUIC stream offset, not arrival order
+    chunks[streamOffset] = streamData;
+
+    final extracted = extract_h3_frames_from_chunks(chunks, readOffset);
+    h3.streamReadOffsets[streamId] = extracted['new_from_offset'] as int;
+
+    for (final frame in extracted['frames']) {
+      final int type = frame['frame_type'] as int;
+      final Uint8List payload = frame['payload'] as Uint8List;
+
+      if (type == H3_FRAME_HEADERS) {
+        _handleHttp3HeadersFrame(streamId, payload);
+        continue;
+      }
+
+      if (type == H3_FRAME_DATA) {
+        print('📦 HTTP/3 DATA on stream=$streamId len=${payload.length}');
+        // Add request-body handling here later if needed
+        continue;
+      }
+
+      if (type == H3_FRAME_SETTINGS) {
+        print('ℹ️ Ignoring unexpected SETTINGS on stream=$streamId');
+        continue;
+      }
+
+      print(
+        'ℹ️ Ignoring unsupported HTTP/3 frame type '
+        '0x${type.toRadixString(16)} on stream=$streamId',
+      );
+    }
+
+    if (fin) {
+      print('✅ QUIC stream $streamId FIN received');
+    }
+  }
+
+  void _acceptWebTransportSession(int streamId) {
+    if (h3.webTransportSessions.containsKey(streamId)) {
+      print('ℹ️ WebTransport session already exists on stream $streamId');
+      return;
+    }
+
+    print('✅ WebTransport session accepted on stream $streamId');
+
+    h3.webTransportSessions[streamId] = WebTransportSession(streamId);
+
+    final responseHeaderBlock = build_http3_literal_headers_frame({
+      ':status': '200',
+      'sec-webtransport-http3-draft': 'draft02',
+    });
+
+    final frames = build_h3_frames([
+      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+    ]);
+
+    sendApplicationStream(streamId, frames, fin: false);
+  }
+
+  void _handleHttp3HeadersFrame(int streamId, Uint8List headerBlock) {
+    final headers = decode_qpack_header_fields(headerBlock);
+
+    String method = '';
+    String path = '';
+    String protocol = '';
+
+    for (final h in headers) {
+      if (h.name == ':method') method = h.value;
+      if (h.name == ':path') path = h.value;
+      if (h.name == ':protocol') protocol = h.value;
+    }
+
+    // ----------------------------------------------------------
+    // WebTransport CONNECT
+    // ----------------------------------------------------------
+    if (method == 'CONNECT' && protocol == WT_PROTOCOL) {
+      _acceptWebTransportSession(streamId);
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // Normal HTTP/3 request
+    // ----------------------------------------------------------
+    print('📥 HTTP/3 request on stream $streamId: $method $path');
+
+    final body = Uint8List.fromList(utf8.encode('hello from http/3'));
+
+    final responseHeaderBlock = build_http3_literal_headers_frame({
+      ':status': '200',
+      'content-type': 'text/plain; charset=utf-8',
+      'content-length': body.length,
+    });
+
+    final responseFrames = build_h3_frames([
+      {'frame_type': H3_FRAME_HEADERS, 'payload': responseHeaderBlock},
+      {'frame_type': H3_FRAME_DATA, 'payload': body},
+    ]);
+
+    sendApplicationStream(streamId, responseFrames, fin: true);
+  }
+
+  void handleWebTransportDatagram(Uint8List datagramPayload) {
+    final parsed = parse_webtransport_datagram(datagramPayload);
+    final int sessionId = parsed['stream_id'] as int;
+    final Uint8List data = parsed['data'] as Uint8List;
+
+    final session = h3.webTransportSessions[sessionId];
+    if (session == null) {
+      print('⚠️ Datagram for unknown WebTransport session $sessionId');
+      return;
+    }
+
+    print('📦 WebTransport datagram session=$sessionId len=${data.length}');
+
+    // Echo example
+    sendWebTransportDatagram(sessionId, data);
+  }
+
+  void sendApplicationStream(
+    int streamId,
+    Uint8List data, {
+    bool fin = false,
+    int offset = 0,
+  }) {
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send application stream before 1-RTT keys');
+    }
+
+    final frame = _buildStreamFrame(
+      streamId: streamId,
+      data: data,
+      offset: offset,
+      fin: fin,
+    );
+
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      peerScid, // DCID = peer/client CID
+      localCid, // SCID = our/server CID
+      Uint8List(0),
+    );
+
+    if (raw == null) {
+      throw StateError('Failed to encrypt application STREAM packet');
+    }
+
+    socket.send(raw, peerAddress, peerPort);
+
+    print(
+      '✅ Sent application STREAM pn=$pn streamId=$streamId '
+      'len=${data.length} fin=$fin',
+    );
+  }
+
+  int _allocateServerUniStreamId() {
+    final id = nextServerUniStreamId;
+    nextServerUniStreamId += 4;
+    return id;
+  }
+
+  void sendApplicationUnidirectionalStream(Uint8List data, {bool fin = false}) {
+    final streamId = _allocateServerUniStreamId();
+    sendApplicationStream(streamId, data, fin: fin, offset: 0);
+  }
+
+  void sendWebTransportDatagram(int sessionId, Uint8List data) {
+    if (!applicationSecretsDerived || appWrite == null) {
+      throw StateError('Cannot send WebTransport DATAGRAM before 1-RTT keys');
+    }
+
+    final payload = Uint8List.fromList([...writeVarInt(sessionId), ...data]);
+
+    final frame = _buildDatagramFrame(payload, useLengthField: true);
+
+    final pn = _allocateSendPn(EncryptionLevel.application);
+
+    final raw = encryptQuicPacket(
+      'short',
+      frame,
+      appWrite!.key,
+      appWrite!.iv,
+      appWrite!.hp,
+      pn,
+      peerScid,
+      localCid,
+      Uint8List(0),
+    );
+
+    if (raw == null) {
+      throw StateError('Failed to encrypt DATAGRAM packet');
+    }
+
+    socket.send(raw, peerAddress, peerPort);
+
+    print(
+      '✅ Sent WebTransport DATAGRAM pn=$pn session=$sessionId len=${data.length}',
+    );
+  }
+
+  Uint8List _buildStreamFrame({
+    required int streamId,
+    required Uint8List data,
+    int offset = 0,
+    bool fin = false,
+  }) {
+    // STREAM frame type bits:
+    // 0x08 base
+    // 0x01 FIN
+    // 0x02 LEN present
+    // 0x04 OFF present
+    int frameType = 0x08;
+
+    if (fin) frameType |= 0x01;
+    frameType |= 0x02; // always include LEN
+    if (offset != 0) frameType |= 0x04;
+
+    return Uint8List.fromList([
+      ...writeVarInt(frameType),
+      ...writeVarInt(streamId),
+      if (offset != 0) ...writeVarInt(offset),
+      ...writeVarInt(data.length),
+      ...data,
+    ]);
+  }
+
+  Uint8List _buildDatagramFrame(
+    Uint8List payload, {
+    bool useLengthField = true,
+  }) {
+    if (useLengthField) {
+      // 0x31 = DATAGRAM with explicit length
+      return Uint8List.fromList([
+        ...writeVarInt(0x31),
+        ...writeVarInt(payload.length),
+        ...payload,
+      ]);
+    }
+
+    // 0x30 = DATAGRAM to end-of-packet
+    return Uint8List.fromList([...writeVarInt(0x30), ...payload]);
+  }
+
   bool _parsePayload(Uint8List plaintext, EncryptionLevel level) {
     print('--- Parsing Decrypted QUIC Payload (server) ---');
 
@@ -679,6 +1238,49 @@ class QuicServerSession {
         if (frameType == 0x01) {
           print('✅ Server parsed PING');
           ackEliciting = true;
+          continue;
+        }
+
+        // =========================================================
+        // ACK (0x02) / ACK + ECN (0x03) — NOT ack-eliciting
+        // =========================================================
+        if (frameType == 0x02 || frameType == 0x03) {
+          final hasEcn = (frameType & 0x01) == 0x01;
+
+          if (buffer.remaining == 0) break;
+          final largest = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
+          final delay = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
+          final rangeCount = buffer.pullVarInt();
+
+          if (buffer.remaining == 0) break;
+          final firstRange = buffer.pullVarInt();
+
+          for (int i = 0; i < rangeCount; i++) {
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // gap
+
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // range length
+          }
+
+          if (hasEcn) {
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ect0
+
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ect1
+
+            if (buffer.remaining == 0) break;
+            buffer.pullVarInt(); // ce
+          }
+
+          print(
+            '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
+          );
           continue;
         }
 
@@ -720,45 +1322,87 @@ class QuicServerSession {
         }
 
         // =========================================================
-        // ACK (0x02) / ACK + ECN (0x03) — NOT ack-eliciting
+        // STREAM frames (0x08..0x0f) — ack-eliciting
         // =========================================================
-        if (frameType == 0x02 || frameType == 0x03) {
-          final hasEcn = (frameType & 0x01) == 0x01;
+        if ((frameType & 0xF8) == 0x08) {
+          final fin = (frameType & 0x01) != 0;
+          final hasLen = (frameType & 0x02) != 0;
+          final hasOff = (frameType & 0x04) != 0;
 
           if (buffer.remaining == 0) break;
-          final largest = buffer.pullVarInt();
+          final streamId = buffer.pullVarInt();
 
-          if (buffer.remaining == 0) break;
-          final delay = buffer.pullVarInt();
+          final streamOffset = hasOff ? buffer.pullVarInt() : 0;
 
-          if (buffer.remaining == 0) break;
-          final rangeCount = buffer.pullVarInt();
+          final dataLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
 
-          if (buffer.remaining == 0) break;
-          final firstRange = buffer.pullVarInt();
-
-          for (int i = 0; i < rangeCount; i++) {
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // gap
-
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // len
+          if (buffer.remaining < dataLen) {
+            print(
+              '🛑 Server STREAM frame truncated: need $dataLen, have ${buffer.remaining}',
+            );
+            break;
           }
 
-          if (hasEcn) {
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // ect0
-
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // ect1
-
-            if (buffer.remaining == 0) break;
-            buffer.pullVarInt(); // ce
-          }
+          final data = buffer.pullBytes(dataLen);
 
           print(
-            '✅ Server parsed ACK largest=$largest delay=$delay firstRange=$firstRange',
+            '✅ Server parsed STREAM '
+            'streamId=$streamId offset=$streamOffset len=$dataLen fin=$fin',
           );
+
+          ackEliciting = true;
+
+          // Only application-level streams are HTTP/3 / WebTransport
+          if (level == EncryptionLevel.application) {
+            handleHttp3StreamChunk(
+              // this,
+              streamId,
+              streamOffset,
+              data,
+              fin: fin,
+            );
+          } else {
+            print('ℹ️ Ignoring non-application STREAM frame on level=$level');
+          }
+
+          continue;
+        }
+
+        // =========================================================
+        // DATAGRAM (0x30 no length, 0x31 with length) — ack-eliciting
+        // =========================================================
+        if (frameType == 0x30 || frameType == 0x31) {
+          final hasLen = frameType == 0x31;
+
+          final datagramLen = hasLen ? buffer.pullVarInt() : buffer.remaining;
+
+          if (buffer.remaining < datagramLen) {
+            print(
+              '🛑 Server DATAGRAM frame truncated: need $datagramLen, have ${buffer.remaining}',
+            );
+            break;
+          }
+
+          final payload = buffer.pullBytes(datagramLen);
+
+          print('✅ Server parsed DATAGRAM len=${payload.length}');
+          ackEliciting = true;
+
+          if (level == EncryptionLevel.application) {
+            handleWebTransportDatagram(payload);
+          } else {
+            print('ℹ️ Ignoring non-application DATAGRAM frame on level=$level');
+          }
+
+          continue;
+        }
+
+        // =========================================================
+        // HANDSHAKE_DONE (0x1e) — ack-eliciting
+        // =========================================================
+        if (frameType == 0x1e) {
+          print('✅ Server parsed HANDSHAKE_DONE');
+          ackEliciting = true;
           continue;
         }
 
@@ -1363,6 +2007,9 @@ class QuicServerSession {
 
     // ✅ Install 1-RTT keys; all future ACKs must be application-level
     _deriveApplicationSecrets();
+
+    // ✅ Start HTTP/3 immediately after 1-RTT is ready
+    sendHttp3ControlStream();
   }
 
   // void _deriveApplicationSecrets() {
