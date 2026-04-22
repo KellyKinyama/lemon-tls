@@ -295,6 +295,23 @@ class QuicSession {
   // ===========================================================================
   // TLS / Handshake send
   // ===========================================================================
+  EncryptionLevel detectPacketLevel(Uint8List packet) {
+    final firstByte = packet[0];
+
+    if ((firstByte & 0x80) != 0) {
+      final longType = parseLongHeaderType(packet);
+
+      if (longType == LongPacketType.initial) {
+        return EncryptionLevel.initial;
+      } else if (longType == LongPacketType.handshake) {
+        return EncryptionLevel.handshake;
+      } else {
+        throw StateError('Unsupported long-header packet type: $longType');
+      }
+    }
+
+    return EncryptionLevel.application;
+  }
 
   void sendClientFinished({
     required InternetAddress address,
@@ -305,7 +322,7 @@ class QuicSession {
     }
 
     final transcriptHash = createHash(
-      Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
+      Uint8List.fromList([...tlsTranscript.toBytes()]),
     );
 
     final finishedKey = hkdfExpandLabel(

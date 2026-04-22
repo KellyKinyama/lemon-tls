@@ -1,7 +1,3 @@
-import 'dart:typed_data';
-
-import 'package:hex/hex.dart';
-
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -9,16 +5,90 @@ import '../buffer.dart';
 import '../handshake/client_hello.dart';
 import '../handshake/tls_msg.dart';
 
-// import '../../buffer.dart';
-// import '../../handshake/client_hello.dart';
+/// ------------------------------------------------------------
+/// QUIC transport parameter IDs ( 0x0004;/// QUIC transport parameter IDs (RFC 9000)
+const int tpInitialMaxStreamDataBidiLocal = 0x0005;
+const int tpInitialMaxStreamDataBidiRemote = 0x0006;
+const int tpInitialMaxStreamDataUni = 0x0007;
+const int tpInitialMaxStreamsBidi = 0x0008;
+const int tpInitialMaxStreamsUni = 0x0009;
+const int tpActiveConnectionIdLimit = 0x000e;
+const int tpInitialSourceConnectionId = 0x000f;
 
-final originalWire = Uint8List.fromList(
-  HEX.decode(
-    "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64"
-        .replaceAll(" ", ""),
-  ),
-);
+/// ------------------------------------------------------------
+/// QUIC varint encoder
+/// ------------------------------------------------------------
+Uint8List _encodeVarInt(int v) {
+  if (v < 0) {
+    throw ArgumentError('QUIC varint must be non-negative: $v');
+  }
 
+  if (v < 0x40) {
+    // 1-byte encoding: 00xxxxxx
+    return Uint8List.fromList([v & 0x3f]);
+  } else if (v < 0x4000) {
+    // 2-byte encoding: 01xxxxxx xxxxxxxx
+    return Uint8List.fromList([0x40 | ((v >> 8) & 0x3f), v & 0xff]);
+  } else if (v < 0x40000000) {
+    // 4-byte encoding: 10xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+    return Uint8List.fromList([
+      0x80 | ((v >> 24) & 0x3f),
+      (v >> 16) & 0xff,
+      (v >> 8) & 0xff,
+      v & 0xff,
+    ]);
+  } else if (v < 0x4000000000000000) {
+    // 8-byte encoding: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+    //                  xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+    return Uint8List.fromList([
+      0xC0 | ((v >> 56) & 0x3f),
+      (v >> 48) & 0xff,
+      (v >> 40) & 0xff,
+      (v >> 32) & 0xff,
+      (v >> 24) & 0xff,
+      (v >> 16) & 0xff,
+      (v >> 8) & 0xff,
+      v & 0xff,
+    ]);
+  } else {
+    throw ArgumentError('QUIC varint out of range: $v');
+  }
+}
+
+/// ------------------------------------------------------------
+/// Transport parameter helpers
+/// ------------------------------------------------------------
+
+/// Integer-valued transport parameter:
+///   id(varint) || length(varint) || value(varint)
+Uint8List _tpInt(int id, int value) {
+  final encodedValue = _encodeVarInt(value);
+
+  return Uint8List.fromList([
+    ..._encodeVarInt(id),
+    ..._encodeVarInt(encodedValue.length),
+    ...encodedValue,
+  ]);
+}
+
+/// Byte-string transport parameter:
+///   id(varint) || length(varint) || raw bytes
+Uint8List _tpBytes(int id, Uint8List value) {
+  return Uint8List.fromList([
+    ..._encodeVarInt(id),
+    ..._encodeVarInt(value.length),
+    ...value,
+  ]);
+}
+
+/// ------------------------------------------------------------
+/// Build a dynamic TLS 1.3 ClientHello for QUIC / HTTP/3
+///
+/// IMPORTANT:
+/// - pass the X25519 *public* key here, not the private key
+/// - use `serialize()` on the returned ClientHello to get the
+///   full TLS Handshake message (header + body)
+/// ------------------------------------------------------------
 ClientHello buildInitialClientHello({
   required String hostname,
   required Uint8List x25519PublicKey,
@@ -35,88 +105,126 @@ ClientHello buildInitialClientHello({
     return TlsExtension(type: type, length: bytes.length, data: bytes);
   }
 
-  // SNI
+  // ----------------------------------------------------------
+  // 1) SNI
+  // ----------------------------------------------------------
   final hostBytes = Uint8List.fromList(hostname.codeUnits);
   final sniBuf = QuicBuffer()
-    ..pushUint16(hostBytes.length + 3)
-    ..pushUint8(0x00)
+    ..pushUint16(hostBytes.length + 3) // server_name_list length
+    ..pushUint8(0x00) // host_name
     ..pushUint16(hostBytes.length)
     ..pushBytes(hostBytes);
+
   extensions.add(makeExt(0x0000, sniBuf));
 
-  // Supported groups
+  // ----------------------------------------------------------
+  // 2) Supported groups
+  // ----------------------------------------------------------
   final groupsBuf = QuicBuffer()
     ..pushUint16(6)
     ..pushUint16(0x001d) // x25519
     ..pushUint16(0x0017) // secp256r1
-    ..pushUint16(0x0018); // secp384r1 if you want to match old CH
+    ..pushUint16(0x0018); // secp384r1
+
   extensions.add(makeExt(0x000a, groupsBuf));
 
-  // ALPN = h3
-  final alpnProto = Uint8List.fromList(alpns.first.codeUnits);
-  final alpnBuf = QuicBuffer()
-    ..pushUint16(alpnProto.length + 1)
-    ..pushUint8(alpnProto.length)
-    ..pushBytes(alpnProto);
-  extensions.add(makeExt(0x0010, alpnBuf));
-
-  // Signature algorithms (match your old list later if needed)
+  // ----------------------------------------------------------
+  // 3) Signature algorithms
+  // ----------------------------------------------------------
   final sigBuf = QuicBuffer()
     ..pushUint16(4)
-    ..pushUint16(0x0403)
-    ..pushUint16(0x0804);
+    ..pushUint16(0x0403) // ecdsa_secp256r1_sha256
+    ..pushUint16(0x0804); // rsa_pss_rsae_sha256
+
   extensions.add(makeExt(0x000d, sigBuf));
 
-  // Key share
+  // ----------------------------------------------------------
+  // 4) KeyShare (X25519)
+  // ----------------------------------------------------------
   final keyShareEntry = QuicBuffer()
-    ..pushUint16(0x001d)
+    ..pushUint16(0x001d) // x25519
     ..pushUint16(x25519PublicKey.length)
     ..pushBytes(x25519PublicKey);
 
   final keyShareBuf = QuicBuffer()
     ..pushUint16(keyShareEntry.writeIndex)
     ..pushBytes(keyShareEntry.toBytes());
+
   extensions.add(makeExt(0x0033, keyShareBuf));
 
-  // PSK key exchange modes
+  // ----------------------------------------------------------
+  // 5) PSK key exchange modes
+  // ----------------------------------------------------------
   final pskBuf = QuicBuffer()
     ..pushUint8(1)
-    ..pushUint8(1);
+    ..pushUint8(1); // psk_dhe_ke
+
   extensions.add(makeExt(0x002d, pskBuf));
 
-  // Supported versions = TLS 1.3
+  // ----------------------------------------------------------
+  // 6) Supported versions = TLS 1.3
+  // ----------------------------------------------------------
   final versionsBuf = QuicBuffer()
     ..pushUint8(2)
     ..pushUint8(0x03)
     ..pushUint8(0x04);
+
   extensions.add(makeExt(0x002b, versionsBuf));
 
-  // QUIC transport params
-  final tpBuf = QuicBuffer();
+  // ----------------------------------------------------------
+  // 7) QUIC transport parameters
+  //
+  // NOTE:
+  // integer-valued transport params MUST be encoded as QUIC varints
+  // inside the parameter value bytes.
+  // ----------------------------------------------------------
+  final tpBytes = BytesBuilder()
+    ..add(_tpInt(tpMaxIdleTimeout, 30000))
+    ..add(_tpInt(tpMaxUdpPayloadSize, 65527))
+    ..add(_tpInt(tpInitialMaxData, 1 << 20))
+    ..add(_tpInt(tpInitialMaxStreamDataBidiLocal, 1 << 18))
+    ..add(_tpInt(tpInitialMaxStreamDataBidiRemote, 1 << 18))
+    ..add(_tpInt(tpInitialMaxStreamDataUni, 1 << 18))
+    ..add(_tpInt(tpInitialMaxStreamsBidi, 16))
+    ..add(_tpInt(tpInitialMaxStreamsUni, 16))
+    ..add(_tpInt(tpActiveConnectionIdLimit, 4))
+    ..add(_tpBytes(tpInitialSourceConnectionId, localCid));
 
-  tpBuf.pushVarint(0x01); // max_idle_timeout
-  tpBuf.pushVarint(2);
-  tpBuf.pushUint16(30000);
+  extensions.add(
+    TlsExtension(
+      type: 0x0039,
+      length: tpBytes.toBytes().length,
+      data: tpBytes.toBytes(),
+    ),
+  );
 
-  tpBuf.pushVarint(0x04); // initial_max_data
-  tpBuf.pushVarint(4);
-  tpBuf.pushUint32(0x100000);
-
-  // initial_source_connection_id
-  tpBuf.pushVarint(0x0f);
-  tpBuf.pushVarint(localCid.length);
-  tpBuf.pushBytes(localCid);
-
-  extensions.add(makeExt(0x0039, tpBuf));
-
+  // ----------------------------------------------------------
+  // IMPORTANT:
+  // We set `alpn: alpns` here so that ClientHello.serialize()
+  // will upsert the ALPN extension correctly.
+  //
+  // We intentionally do NOT manually add extension 0x0010 here,
+  // because serialize() / upsertAlpnExtension() will handle it
+  // from the semantic `alpn` field.
+  // ----------------------------------------------------------
   return ClientHello(
     type: 'client_hello',
     legacyVersion: 0x0303,
     random: random,
     sessionId: Uint8List(0),
-    cipherSuites: const [0x1301, 0x1302, 0x1303],
+    cipherSuites: const [
+      0x1301, // TLS_AES_128_GCM_SHA256
+      0x1302, // TLS_AES_256_GCM_SHA384
+      0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    ],
     compressionMethods: Uint8List.fromList([0x00]),
     extensions: extensions,
     rawData: Uint8List(0),
+    alpn: alpns,
   );
 }
+
+/// ------------------------------------------------------------
+const int tpMaxIdleTimeout = 0x0001;
+const int tpMaxUdpPayloadSize = 0x0003;
+const int tpInitialMaxData = 0x0004;
