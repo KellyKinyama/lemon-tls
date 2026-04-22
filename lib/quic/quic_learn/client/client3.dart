@@ -32,8 +32,14 @@ Future<void> main() async {
     }
   });
 
+  quicSession.sendClientHello(
+    address: InternetAddress("127.0.0.1"),
+    port: 4433,
+    authority: 'localhost',
+  );
+
   // Timer.periodic(Duration(seconds: 2), (_) {
-  socket.send(udp1ClientHello, InternetAddress("127.0.0.1"), 4433);
+  // socket.send(udp1ClientHello, InternetAddress("127.0.0.1"), 4433);
   // });
 }
 

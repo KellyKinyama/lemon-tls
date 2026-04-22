@@ -11,6 +11,7 @@ import 'package:hex/hex.dart';
 
 import '../../cipher/x25519.dart';
 import '../../frames/quic_frames.dart';
+import '../../handshake/client_hello.dart';
 import '../../handshake/server_hello.dart';
 // import '../../handshake/tls_messages.dart';
 import '../../handshake/tls_msg.dart';
@@ -20,6 +21,7 @@ import '../../packet/quic_packet.dart';
 import '../../quic_ack.dart';
 import '../../utils.dart';
 import '../client_hello_builder.dart';
+import '../client_hello_builder.dart' as chb;
 import '../h31.dart';
 import '../constants.dart';
 import 'payload_parser3.dart';
@@ -40,8 +42,17 @@ class ClientWebTransportSession {
 
 final _bytesEq = const ListEquality<int>();
 
-Uint8List buildCryptoFrame(Uint8List data) {
-  return Uint8List.fromList([0x06, 0x00, data.length, ...data]);
+// Uint8List buildCryptoFrame(Uint8List data) {
+//   return Uint8List.fromList([0x06, 0x00, data.length, ...data]);
+// }
+
+Uint8List buildCryptoFrame(Uint8List data, {int offset = 0}) {
+  return Uint8List.fromList([
+    0x06,
+    ...writeVarInt(offset),
+    ...writeVarInt(data.length),
+    ...data,
+  ]);
 }
 
 class Http3ClientState {
@@ -125,11 +136,11 @@ class QuicSession {
 
   ServerHello? receivedServello;
 
-  Uint8List privateKeyBytes = Uint8List.fromList(
-    HEX.decode(
-      "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-    ),
-  );
+  // Uint8List privateKeyBytes = Uint8List.fromList(
+  //   HEX.decode(
+  //     "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  //   ),
+  // );
 
   final Map<EncryptionLevel, Map<int, Uint8List>> cryptoChunksByLevel = {
     EncryptionLevel.initial: <int, Uint8List>{},
@@ -166,7 +177,10 @@ class QuicSession {
   bool webTransportDatagramSent = false;
   int? activeWebTransportSessionId;
 
+  late KeyPair keyPair;
+
   QuicSession(this.dcid, this.socket) {
+    keyPair = KeyPair.generate();
     generateSecrets();
     _readKeys[EncryptionLevel.initial] = initialRead!;
     localCid = _randomCid(8);
@@ -175,6 +189,76 @@ class QuicSession {
   Uint8List _randomCid([int len = 8]) {
     final rnd = math.Random.secure();
     return Uint8List.fromList(List.generate(len, (_) => rnd.nextInt(256)));
+  }
+
+  ClientHello? builtClientHello;
+  Uint8List? clientHelloRaw;
+
+  Uint8List buildDynamicClientHello({String authority = 'localhost'}) {
+    final ch = chb.buildInitialClientHello(
+      hostname: authority,
+      x25519PublicKey: Uint8List.fromList(
+        keyPair.publicKeyBytes, // WRONG if used directly
+      ),
+      localCid: localCid,
+      alpns: const ['h3'],
+    );
+
+    final wire = ch.serialize();
+
+    builtClientHello = ch;
+    clientHelloRaw = wire;
+
+    print('🚨 Built dynamic ClientHello len=${wire.length}');
+    print('🚨 Dynamic ALPNs: ${ch.alpnProtocols}');
+
+    return wire;
+  }
+
+  void sendClientHello({
+    required InternetAddress address,
+    required int port,
+    String authority = 'localhost',
+  }) {
+    if (initialWrite == null) {
+      throw StateError("Initial write keys not available");
+    }
+
+    final Uint8List chWire = buildDynamicClientHello(
+      authority: authority,
+      // alpns: const ['h3'],
+    );
+    clientHelloRaw = chWire;
+
+    final cryptoPayload = buildCryptoFrame(chWire);
+
+    final ackState = ackStates[EncryptionLevel.initial]!;
+    final pn = ackState.allocatePn();
+
+    final rawPacket = encryptQuicPacket(
+      "initial",
+      cryptoPayload,
+      initialWrite!.key,
+      initialWrite!.iv,
+      initialWrite!.hp,
+      pn,
+      dcid, // original destination CID chosen by client
+      localCid, // current client source CID
+      Uint8List(0),
+    );
+
+    if (rawPacket == null) {
+      throw StateError("Failed to encrypt Initial ClientHello");
+    }
+
+    final bytesToSend = padTo1200(rawPacket);
+    socket.send(bytesToSend, address, port);
+
+    print(
+      "🚀 Sent Initial ClientHello pn=$pn "
+      "dcid=${HEX.encode(dcid)} scid=${HEX.encode(localCid)} "
+      "len=${bytesToSend.length}",
+    );
   }
 
   // ===========================================================================
@@ -313,9 +397,18 @@ class QuicSession {
       throw StateError("Handshake write keys not available");
     }
 
+    final ch = clientHelloRaw;
+    if (ch == null) {
+      throw StateError("Dynamic ClientHello not built yet");
+    }
+
     final transcriptHash = createHash(
-      Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
+      Uint8List.fromList([...ch, ...tlsTranscript.toBytes()]),
     );
+
+    // final transcriptHash = createHash(
+    //   Uint8List.fromList([...originalWire, ...tlsTranscript.toBytes()]),
+    // );
 
     final finishedKey = hkdfExpandLabel(
       secret: clientHsTrafficSecret,
@@ -392,11 +485,20 @@ class QuicSession {
   // Handshake transcript helpers
   // ===========================================================================
 
+  // Uint8List transcriptThroughServerHandshake() {
+  //   return Uint8List.fromList([
+  //     ...clientHelloBytes,
+  //     ...tlsTranscript.toBytes(),
+  //   ]);
+  // }
+
   Uint8List transcriptThroughServerHandshake() {
-    return Uint8List.fromList([
-      ...clientHelloBytes,
-      ...tlsTranscript.toBytes(),
-    ]);
+    final ch = clientHelloRaw;
+    if (ch == null) {
+      throw StateError("Dynamic ClientHello not built yet");
+    }
+
+    return Uint8List.fromList([...ch, ...tlsTranscript.toBytes()]);
   }
 
   Uint8List testHash() {
@@ -601,7 +703,7 @@ class QuicSession {
 
   void handshakeKeyDerivationTest() {
     final sharedSecret = x25519ShareSecret(
-      privateKey: privateKeyBytes,
+      privateKey: keyPair.privateKeyBytes,
       publicKey: receivedServello!.keyShareEntry!.pub,
     );
 
@@ -1413,8 +1515,8 @@ class QuicSession {
   }
 }
 
-final clientHelloBytes = Uint8List.fromList(
-  HEX.decode(
-    "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64",
-  ),
-);
+// final clientHelloBytes = Uint8List.fromList(
+//   HEX.decode(
+//     "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64",
+//   ),
+// );

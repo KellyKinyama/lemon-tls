@@ -554,149 +554,149 @@ final clientHello = Uint8List.fromList(
   ),
 );
 
-// void main() {
-//   // ==========================================================
-//   // 1️⃣ Raw TLS ClientHello (handshake header + body)
-//   // ==========================================================
-//   final clientHelloWire = Uint8List.fromList(
-//     HEX.decode(
-//       "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64"
-//           .replaceAll(" ", ""),
-//     ),
-//   );
-
-//   print("✅ ClientHello wire length = ${clientHelloWire.length}");
-//   print("Handshake type = 0x${clientHelloWire[0].toRadixString(16)}");
-
-//   // ==========================================================
-//   // 2️⃣ Parse ClientHello (strip handshake header)
-//   // ==========================================================
-//   final parsed = ClientHello.parse_tls_client_hello(clientHelloWire.sublist(4));
-
-//   print(parsed);
-
-//   // ✅ sanity checks
-//   if (parsed.legacyVersion != 0x0303) {
-//     throw StateError(
-//       "Invalid legacy_version: expected 0x0303, "
-//       "got 0x${parsed.legacyVersion.toRadixString(16)}",
-//     );
-//   }
-
-//   if (!parsed.cipherSuites.contains(0x1301)) {
-//     throw StateError(
-//       "ClientHello does not advertise TLS_AES_128_GCM_SHA256 (0x1301)",
-//     );
-//   }
-
-//   if (parsed.keyShares == null || parsed.keyShares!.isEmpty) {
-//     throw StateError("ClientHello contains no key_share extension");
-//   }
-
-//   final x25519Share = parsed.keyShares!.firstWhere(
-//     (ks) => ks.group == 0x001d,
-//     orElse: () => throw StateError(
-//       "ClientHello does not contain an X25519 (0x001d) key_share",
-//     ),
-//   );
-
-//   // ==========================================================
-//   // 3️⃣ Re‑serialize ClientHello
-//   // ==========================================================
-//   final rebuilt = parsed.serialize();
-
-//   print("✅ Rebuilt ClientHello length = ${rebuilt.length}");
-
-//   // ==========================================================
-//   // 4️⃣ Byte‑for‑byte equality check
-//   // ==========================================================
-//   final eq = const ListEquality<int>().equals(clientHelloWire, rebuilt);
-
-//   if (!eq) {
-//     print("❌ MISMATCH!");
-//     print("Original:");
-//     print(HEX.encode(clientHelloWire));
-//     print("Rebuilt:");
-//     print(HEX.encode(rebuilt));
-//     throw StateError("ClientHello round‑trip mismatch");
-//   }
-
-//   print("✅ ClientHello parse ⇄ build round‑trip OK");
-// }
-
 void main() {
-  final originalWire = Uint8List.fromList(
+  // ==========================================================
+  // 1️⃣ Raw TLS ClientHello (handshake header + body)
+  // ==========================================================
+  final clientHelloWire = Uint8List.fromList(
     HEX.decode(
       "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64"
           .replaceAll(" ", ""),
     ),
   );
 
-  Uint8List current = originalWire;
+  print("✅ ClientHello wire length = ${clientHelloWire.length}");
+  print("Handshake type = 0x${clientHelloWire[0].toRadixString(16)}");
 
-  const iterations = 10;
+  // ==========================================================
+  // 2️⃣ Parse ClientHello (strip handshake header)
+  // ==========================================================
+  final parsed = ClientHello.parse_tls_client_hello(clientHelloWire.sublist(4));
 
-  for (int i = 0; i < iterations; i++) {
-    // --------------------------------------------------
-    // 1. Parse (strip handshake header)
-    // --------------------------------------------------
-    if (current.length < 4 || current[0] != 0x01) {
-      throw StateError("Iteration $i: not a ClientHello handshake");
-    }
+  print(parsed);
 
-    final parsed = ClientHello.parse_tls_client_hello(current.sublist(4));
-
-    // --------------------------------------------------
-    // 2. Validate parsed structure explicitly
-    // --------------------------------------------------
-    if (parsed.legacyVersion != 0x0303) {
-      throw StateError("Iteration $i: legacy_version mismatch");
-    }
-
-    if (!parsed.cipherSuites.contains(0x1301)) {
-      throw StateError("Iteration $i: missing TLS_AES_128_GCM_SHA256");
-    }
-
-    if (parsed.keyShares == null || parsed.keyShares!.isEmpty) {
-      throw StateError("Iteration $i: key_share missing");
-    }
-
-    final hasX25519 = parsed.keyShares!.any((ks) => ks.group == 0x001d);
-
-    if (!hasX25519) {
-      throw StateError("Iteration $i: X25519 key_share missing");
-    }
-
-    // --------------------------------------------------
-    // 3. Rebuild
-    // --------------------------------------------------
-    final rebuilt = parsed.serialize();
-
-    // --------------------------------------------------
-    // 4. Byte‑for‑byte compare
-    // --------------------------------------------------
-    if (rebuilt.length != current.length) {
-      throw StateError(
-        "Iteration $i: length mismatch "
-        "${rebuilt.length} != ${current.length}",
-      );
-    }
-
-    for (int j = 0; j < rebuilt.length; j++) {
-      if (rebuilt[j] != current[j]) {
-        throw StateError(
-          "Iteration $i: byte mismatch at offset $j "
-          "(0x${current[j].toRadixString(16)} != "
-          "0x${rebuilt[j].toRadixString(16)})",
-        );
-      }
-    }
-
-    print("✅ Iteration $i OK");
-
-    // Feed rebuilt bytes into next round
-    current = rebuilt;
+  // ✅ sanity checks
+  if (parsed.legacyVersion != 0x0303) {
+    throw StateError(
+      "Invalid legacy_version: expected 0x0303, "
+      "got 0x${parsed.legacyVersion.toRadixString(16)}",
+    );
   }
 
-  print("✅ ClientHello stable after $iterations parse ⇄ build cycles");
+  if (!parsed.cipherSuites.contains(0x1301)) {
+    throw StateError(
+      "ClientHello does not advertise TLS_AES_128_GCM_SHA256 (0x1301)",
+    );
+  }
+
+  if (parsed.keyShares == null || parsed.keyShares!.isEmpty) {
+    throw StateError("ClientHello contains no key_share extension");
+  }
+
+  final x25519Share = parsed.keyShares!.firstWhere(
+    (ks) => ks.group == 0x001d,
+    orElse: () => throw StateError(
+      "ClientHello does not contain an X25519 (0x001d) key_share",
+    ),
+  );
+
+  // ==========================================================
+  // 3️⃣ Re‑serialize ClientHello
+  // ==========================================================
+  final rebuilt = parsed.serialize();
+
+  print("✅ Rebuilt ClientHello length = ${rebuilt.length}");
+
+  // ==========================================================
+  // 4️⃣ Byte‑for‑byte equality check
+  // ==========================================================
+  final eq = const ListEquality<int>().equals(clientHelloWire, rebuilt);
+
+  if (!eq) {
+    print("❌ MISMATCH!");
+    print("Original:");
+    print(HEX.encode(clientHelloWire));
+    print("Rebuilt:");
+    print(HEX.encode(rebuilt));
+    throw StateError("ClientHello round‑trip mismatch");
+  }
+
+  print("✅ ClientHello parse ⇄ build round‑trip OK");
 }
+
+// void main() {
+//   final originalWire = Uint8List.fromList(
+//     HEX.decode(
+//       "01 00 00 ea 03 03 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 00 00 06 13 01 13 02 13 03 01 00 00 bb 00 00 00 18 00 16 00 00 13 65 78 61 6d 70 6c 65 2e 75 6c 66 68 65 69 6d 2e 6e 65 74 00 0a 00 08 00 06 00 1d 00 17 00 18 00 10 00 0b 00 09 08 70 69 6e 67 2f 31 2e 30 00 0d 00 14 00 12 04 03 08 04 04 01 05 03 08 05 05 01 08 06 06 01 02 01 00 33 00 26 00 24 00 1d 00 20 35 80 72 d6 36 58 80 d1 ae ea 32 9a df 91 21 38 38 51 ed 21 a2 8e 3b 75 e9 65 d0 d2 cd 16 62 54 00 2d 00 02 01 01 00 2b 00 03 02 03 04 00 39 00 31 03 04 80 00 ff f7 04 04 80 a0 00 00 05 04 80 10 00 00 06 04 80 10 00 00 07 04 80 10 00 00 08 01 0a 09 01 0a 0a 01 03 0b 01 19 0f 05 63 5f 63 69 64"
+//           .replaceAll(" ", ""),
+//     ),
+//   );
+
+//   Uint8List current = originalWire;
+
+//   const iterations = 10;
+
+//   for (int i = 0; i < iterations; i++) {
+//     // --------------------------------------------------
+//     // 1. Parse (strip handshake header)
+//     // --------------------------------------------------
+//     if (current.length < 4 || current[0] != 0x01) {
+//       throw StateError("Iteration $i: not a ClientHello handshake");
+//     }
+
+//     final parsed = ClientHello.parse_tls_client_hello(current.sublist(4));
+
+//     // --------------------------------------------------
+//     // 2. Validate parsed structure explicitly
+//     // --------------------------------------------------
+//     if (parsed.legacyVersion != 0x0303) {
+//       throw StateError("Iteration $i: legacy_version mismatch");
+//     }
+
+//     if (!parsed.cipherSuites.contains(0x1301)) {
+//       throw StateError("Iteration $i: missing TLS_AES_128_GCM_SHA256");
+//     }
+
+//     if (parsed.keyShares == null || parsed.keyShares!.isEmpty) {
+//       throw StateError("Iteration $i: key_share missing");
+//     }
+
+//     final hasX25519 = parsed.keyShares!.any((ks) => ks.group == 0x001d);
+
+//     if (!hasX25519) {
+//       throw StateError("Iteration $i: X25519 key_share missing");
+//     }
+
+//     // --------------------------------------------------
+//     // 3. Rebuild
+//     // --------------------------------------------------
+//     final rebuilt = parsed.serialize();
+
+//     // --------------------------------------------------
+//     // 4. Byte‑for‑byte compare
+//     // --------------------------------------------------
+//     if (rebuilt.length != current.length) {
+//       throw StateError(
+//         "Iteration $i: length mismatch "
+//         "${rebuilt.length} != ${current.length}",
+//       );
+//     }
+
+//     for (int j = 0; j < rebuilt.length; j++) {
+//       if (rebuilt[j] != current[j]) {
+//         throw StateError(
+//           "Iteration $i: byte mismatch at offset $j "
+//           "(0x${current[j].toRadixString(16)} != "
+//           "0x${rebuilt[j].toRadixString(16)})",
+//         );
+//       }
+//     }
+
+//     print("✅ Iteration $i OK");
+
+//     // Feed rebuilt bytes into next round
+//     current = rebuilt;
+//   }
+
+//   print("✅ ClientHello stable after $iterations parse ⇄ build cycles");
+// }

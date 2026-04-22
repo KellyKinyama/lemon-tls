@@ -102,13 +102,41 @@ const String alpnPing = 'ping/1.0';
 
 /// Server preference order.
 /// The first match with the client's offered ALPNs wins.
+// const List<String> supportedAlpnProtocols = [
+//   alpnQuicEchoExample,
+//   alpnH3,
+//   alpnH3_32,
+//   alpnH3_29,
+//   alpnPing,
+// ];
+
+// const String alpnH3 = 'h3';const String alpnH alpnH3_29 = 'h3-29';
+// const String alpnQuicEchoExample = 'quic-echo-example';
+// const String alpnPing = 'ping/1.0';
+
+/// Server preference order.
+/// The first match with the client's offered ALPNs wins.
 const List<String> supportedAlpnProtocols = [
-  alpnQuicEchoExample,
   alpnH3,
   alpnH3_32,
   alpnH3_29,
+  alpnQuicEchoExample,
   alpnPing,
 ];
+
+// String chooseServerAlpn(List<String> clientOffered) {
+//   for (final supported in supportedAlpnProtocols) {
+//     if (clientOffered.contains(supported)) {
+//       return supported;
+//     }
+//   }
+
+//   throw StateError(
+//     'No compatible ALPN. Client offered: $clientOffered, '
+//     'server supports: $supportedAlpnProtocols',
+//   );
+// }
+// const String alpnH3_32 = 'h3-32';
 
 String chooseServerAlpn(List<String> clientOffered) {
   for (final supported in supportedAlpnProtocols) {
