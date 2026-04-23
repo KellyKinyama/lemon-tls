@@ -24,6 +24,7 @@ import '../client_hello_builder.dart';
 import '../client_hello_builder.dart' as chb;
 import '../h31.dart';
 import '../constants.dart';
+import '../stream.dart';
 import 'payload_parser3.dart';
 
 const int H3_FRAME_DATA = 0x00;
@@ -1032,6 +1033,13 @@ class QuicSession {
 
   //   print("parsed: $parsed");
   // }
+  final Map<int, QuicStreamReassembler> streamReassemblers = {};
+  QuicStreamReassembler _stream(int streamId) {
+    return streamReassemblers.putIfAbsent(
+      streamId,
+      () => QuicStreamReassembler(),
+    );
+  }
 
   void handleQuicPacket(Uint8List pkt) {
     // Learn the server CID from long-header packets before decrypting.
@@ -1085,7 +1093,7 @@ class QuicSession {
       print("📤 Client Finished sent");
     }
 
-    print("parsed: $parsed");
+    print("parsed: $parsed, encryption level: $actualLevel");
   }
 
   // ===========================================================================
@@ -1107,6 +1115,144 @@ class QuicSession {
     return id;
   }
 
+  // void handleHttp3StreamChunk(
+  //   int streamId,
+  //   int streamOffset,
+  //   Uint8List streamData, {
+  //   required bool fin,
+  // }) {
+  //   // ----------------------------------------------------------
+  //   // 1) Raw QUIC stream reassembly
+  //   // ----------------------------------------------------------
+  //   final rawChunks = h3.rawStreamChunks.putIfAbsent(
+  //     streamId,
+  //     () => <int, Uint8List>{},
+  //   );
+  //   rawChunks[streamOffset] = streamData;
+
+  //   String kind = h3.streamKinds[streamId] ?? 'unknown';
+
+  //   // ----------------------------------------------------------
+  //   // 2) Determine stream kind
+  //   // ----------------------------------------------------------
+  //   if (kind == 'unknown') {
+  //     if (_isClientInitiatedBidi(streamId)) {
+  //       // Request stream: no stream-type prefix
+  //       kind = 'request';
+  //       h3.streamKinds[streamId] = kind;
+  //       h3.streamTypePrefixLen[streamId] = 0;
+  //     } else if (_isServerInitiatedUni(streamId)) {
+  //       // Need bytes starting at offset 0 to read stream type varint
+  //       final zeroChunk = rawChunks[0];
+  //       if (zeroChunk == null) {
+  //         return;
+  //       }
+
+  //       final typeInfo = readVarInt(zeroChunk, 0);
+  //       if (typeInfo == null) {
+  //         return;
+  //       }
+
+  //       final streamType = typeInfo.value as int;
+  //       final prefixLen = typeInfo.byteLength as int;
+  //       h3.streamTypePrefixLen[streamId] = prefixLen;
+
+  //       if (streamType == H3_STREAM_TYPE_CONTROL) {
+  //         kind = 'control';
+  //         h3.controlStreamSeen = true;
+  //         print('✅ Saw HTTP/3 control stream on QUIC stream $streamId');
+  //       } else {
+  //         kind = 'other_uni';
+  //         print(
+  //           'ℹ️ Saw unsupported server uni stream type '
+  //           '0x${streamType.toRadixString(16)} on QUIC stream $streamId',
+  //         );
+  //       }
+
+  //       h3.streamKinds[streamId] = kind;
+  //     } else {
+  //       kind = 'other';
+  //       h3.streamKinds[streamId] = kind;
+  //       h3.streamTypePrefixLen[streamId] = 0;
+  //     }
+  //   }
+
+  //   final prefixLen = h3.streamTypePrefixLen[streamId] ?? 0;
+
+  //   // ----------------------------------------------------------
+  //   // 3) Strip uni-stream type prefix before H3 frame parsing
+  //   // ----------------------------------------------------------
+  //   final rawStart = streamOffset;
+  //   final rawEnd = streamOffset + streamData.length;
+
+  //   if (rawEnd <= prefixLen) {
+  //     // Entire chunk is still within the stream-type prefix
+  //     return;
+  //   }
+
+  //   int sliceStartInChunk = 0;
+  //   int h3Offset = rawStart - prefixLen;
+
+  //   if (rawStart < prefixLen) {
+  //     sliceStartInChunk = prefixLen - rawStart;
+  //     h3Offset = 0;
+  //   }
+
+  //   final h3Bytes = streamData.sublist(sliceStartInChunk);
+
+  //   final frameChunks = h3.h3FrameChunks.putIfAbsent(
+  //     streamId,
+  //     () => <int, Uint8List>{},
+  //   );
+  //   frameChunks[h3Offset] = h3Bytes;
+
+  //   final readOffset = h3.h3FrameReadOffsets[streamId] ?? 0;
+  //   final extracted = extract_h3_frames_from_chunks(frameChunks, readOffset);
+  //   h3.h3FrameReadOffsets[streamId] = extracted['new_from_offset'] as int;
+
+  //   for (final frame in extracted['frames']) {
+  //     final int type = frame['frame_type'] as int;
+  //     final Uint8List payload = frame['payload'] as Uint8List;
+
+  //     if (kind == 'control') {
+  //       _handleHttp3ControlFrame(type, payload);
+  //       continue;
+  //     }
+
+  //     if (kind == 'request') {
+  //       _handleHttp3RequestStreamFrame(streamId, type, payload);
+  //       continue;
+  //     }
+
+  //     print(
+  //       'ℹ️ Ignoring HTTP/3 frame type=0x${type.toRadixString(16)} '
+  //       'on stream=$streamId kind=$kind',
+  //     );
+  //   }
+
+  //   if (fin) {
+  //     print('✅ QUIC stream $streamId FIN received');
+  //   }
+  // }
+  final Map<EncryptionLevel, QuicStreamReassembler> cryptoReassemblers = {
+    EncryptionLevel.initial: QuicStreamReassembler(),
+    EncryptionLevel.handshake: QuicStreamReassembler(),
+    EncryptionLevel.application: QuicStreamReassembler(),
+  };
+  Uint8List consumeCryptoBytes(
+    EncryptionLevel level,
+    int offset,
+    Uint8List data,
+  ) {
+    final r = cryptoReassemblers[level]!;
+
+    // Insert CRYPTO bytes (safe against retransmissions)
+    r.insert(offset, data);
+
+    // Drain only NEW contiguous bytes
+    return r.drain();
+  }
+
   void handleHttp3StreamChunk(
     int streamId,
     int streamOffset,
@@ -1114,39 +1260,43 @@ class QuicSession {
     required bool fin,
   }) {
     // ----------------------------------------------------------
-    // 1) Raw QUIC stream reassembly
+    // 1) QUIC stream reassembly + retirement (core fix)
     // ----------------------------------------------------------
-    final rawChunks = h3.rawStreamChunks.putIfAbsent(
-      streamId,
-      () => <int, Uint8List>{},
-    );
-    rawChunks[streamOffset] = streamData;
+    final reassembler = _stream(streamId);
 
+    reassembler.insert(streamOffset, streamData);
+    final newBytes = reassembler.drain();
+
+    if (newBytes.isEmpty) {
+      // Pure retransmission, already consumed
+      return;
+    }
+
+    // Compute absolute byte range of newly-drained bytes
+    final int newStart = reassembler.readOffset - newBytes.length;
+    final int newEnd = reassembler.readOffset;
+
+    // ----------------------------------------------------------
+    // 2) Determine stream kind (control / request / other)
+    // ----------------------------------------------------------
     String kind = h3.streamKinds[streamId] ?? 'unknown';
 
-    // ----------------------------------------------------------
-    // 2) Determine stream kind
-    // ----------------------------------------------------------
     if (kind == 'unknown') {
       if (_isClientInitiatedBidi(streamId)) {
-        // Request stream: no stream-type prefix
         kind = 'request';
         h3.streamKinds[streamId] = kind;
         h3.streamTypePrefixLen[streamId] = 0;
       } else if (_isServerInitiatedUni(streamId)) {
-        // Need bytes starting at offset 0 to read stream type varint
-        final zeroChunk = rawChunks[0];
-        if (zeroChunk == null) {
-          return;
-        }
-
-        final typeInfo = readVarInt(zeroChunk, 0);
+        // Server uni stream: first varint is stream type
+        final typeInfo = readVarInt(newBytes, 0);
         if (typeInfo == null) {
+          // Need more bytes
           return;
         }
 
         final streamType = typeInfo.value as int;
         final prefixLen = typeInfo.byteLength as int;
+
         h3.streamTypePrefixLen[streamId] = prefixLen;
 
         if (streamType == H3_STREAM_TYPE_CONTROL) {
@@ -1156,8 +1306,8 @@ class QuicSession {
         } else {
           kind = 'other_uni';
           print(
-            'ℹ️ Saw unsupported server uni stream type '
-            '0x${streamType.toRadixString(16)} on QUIC stream $streamId',
+            'ℹ️ Ignoring server uni stream type '
+            '0x${streamType.toRadixString(16)} on stream $streamId',
           );
         }
 
@@ -1169,37 +1319,39 @@ class QuicSession {
       }
     }
 
-    final prefixLen = h3.streamTypePrefixLen[streamId] ?? 0;
+    final int prefixLen = h3.streamTypePrefixLen[streamId] ?? 0;
 
     // ----------------------------------------------------------
-    // 3) Strip uni-stream type prefix before H3 frame parsing
+    // 3) Strip uni-stream type prefix
     // ----------------------------------------------------------
-    final rawStart = streamOffset;
-    final rawEnd = streamOffset + streamData.length;
-
-    if (rawEnd <= prefixLen) {
-      // Entire chunk is still within the stream-type prefix
+    if (newEnd <= prefixLen) {
+      // Still inside prefix bytes
       return;
     }
 
-    int sliceStartInChunk = 0;
-    int h3Offset = rawStart - prefixLen;
+    int sliceStart = 0;
+    int h3Offset = newStart - prefixLen;
 
-    if (rawStart < prefixLen) {
-      sliceStartInChunk = prefixLen - rawStart;
+    if (newStart < prefixLen) {
+      sliceStart = prefixLen - newStart;
       h3Offset = 0;
     }
 
-    final h3Bytes = streamData.sublist(sliceStartInChunk);
+    final Uint8List h3Bytes = newBytes.sublist(sliceStart);
 
+    // ----------------------------------------------------------
+    // 4) HTTP/3 frame extraction (ordered, deduplicated)
+    // ----------------------------------------------------------
     final frameChunks = h3.h3FrameChunks.putIfAbsent(
       streamId,
       () => <int, Uint8List>{},
     );
+
     frameChunks[h3Offset] = h3Bytes;
 
-    final readOffset = h3.h3FrameReadOffsets[streamId] ?? 0;
+    final int readOffset = h3.h3FrameReadOffsets[streamId] ?? 0;
     final extracted = extract_h3_frames_from_chunks(frameChunks, readOffset);
+
     h3.h3FrameReadOffsets[streamId] = extracted['new_from_offset'] as int;
 
     for (final frame in extracted['frames']) {
